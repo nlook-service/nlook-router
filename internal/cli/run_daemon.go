@@ -21,7 +21,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/ws"
 )
 
-const version = "0.2.1"
+const version = "0.2.2"
 
 // RunDaemon starts the local HTTP server, heartbeat loop, WebSocket client, and SSH proxy.
 func RunDaemon(cfg *config.Config) error {
