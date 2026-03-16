@@ -1,0 +1,9 @@
+# tools-bridge는 agno 패키지를 import합니다 (loader.py, cli.py).
+# 반드시 아래 중 하나로 agno를 먼저 설치해야 합니다.
+#
+# 1) PyPI (버전 고정)
+#    pip install agno==2.5.9
+# 2) 로컬 소스 (버전 맞춰 사용)
+#    pip install -e /path/to/agno/libs/agno
+#
+agno>=2.5.0

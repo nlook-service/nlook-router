@@ -4,14 +4,17 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/nlook-service/nlook-router/internal/tools"
 )
 
-// Server is the local HTTP API (health, status).
+// Server is the local HTTP API (health, status, tools).
 type Server struct {
-	addr     string
-	mux      *http.ServeMux
-	httpServer *http.Server
-	status  *Status
+	addr        string
+	mux         *http.ServeMux
+	httpServer  *http.Server
+	status      *Status
+	toolsLister tools.Lister
 }
 
 // Status holds runtime status for GET /status.
@@ -33,6 +36,11 @@ func New(addr string, status *Status) *Server {
 		Handler: s.mux,
 	}
 	return s
+}
+
+// SetToolsLister sets the lister for GET /tools. If not set, /tools returns 503.
+func (s *Server) SetToolsLister(l tools.Lister) {
+	s.toolsLister = l
 }
 
 // ListenAndServe blocks until the server is stopped.

@@ -69,6 +69,18 @@ func (m *mockClient) Heartbeat(_ context.Context, _ *apiclient.RegisterPayload) 
 	return nil
 }
 
+func (m *mockClient) GetSchedules(_ context.Context, _ int64) ([]apiclient.Schedule, error) {
+	return nil, nil
+}
+
+func (m *mockClient) CreateRun(_ context.Context, _ int64, _ map[string]interface{}, _ string, _ int64) (*apiclient.RunInfo, error) {
+	return nil, nil
+}
+
+func (m *mockClient) CreateRunWithParams(_ context.Context, _ apiclient.CreateRunParams) (*apiclient.RunInfo, error) {
+	return nil, nil
+}
+
 func (m *mockClient) GetWorkflowDetail(_ context.Context, id int64) (*apiclient.WorkflowDetail, error) {
 	return nil, fmt.Errorf("not implemented in mock")
 }

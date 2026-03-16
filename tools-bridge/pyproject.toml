@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nlook-tools-bridge"
+version = "0.1.0"
+description = "Bridge Agno tools for nlook router (CLI --list, --run)"
+requires-python = ">=3.10"
+dependencies = [
+    "agno>=2.5.0",
+]
+
+[project.scripts]
+nlook-tools-bridge = "tool_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tool_bridge*"]

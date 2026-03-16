@@ -49,6 +49,15 @@ func (m *mockClient) StartStep(ctx context.Context, workflowID, runID int64, nod
 func (m *mockClient) CompleteStep(ctx context.Context, workflowID, runID, logID int64, status string, output map[string]interface{}, errMsg string, logLines []string) error {
 	return nil
 }
+func (m *mockClient) GetSchedules(ctx context.Context, workflowID int64) ([]apiclient.Schedule, error) {
+	return nil, nil
+}
+func (m *mockClient) CreateRun(ctx context.Context, workflowID int64, input map[string]interface{}, triggerType string, scheduleID int64) (*apiclient.RunInfo, error) {
+	return nil, nil
+}
+func (m *mockClient) CreateRunWithParams(ctx context.Context, params apiclient.CreateRunParams) (*apiclient.RunInfo, error) {
+	return nil, nil
+}
 
 func TestRegistrar_Start_ReturnsErrorWhenRegisterFails(t *testing.T) {
 	mock := &mockClient{registerErr: errors.New("register failed")}

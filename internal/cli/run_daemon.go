@@ -19,6 +19,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/scheduler"
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
+	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/ws"
 )
 
@@ -42,6 +43,21 @@ func RunDaemon(cfg *config.Config) error {
 	if payload.RouterID == "" {
 		payload.RouterID = "local-1"
 	}
+	// Always include built-in tools
+	payload.Tools = tools.BuiltInTools()
+
+	var toolsBridge *tools.CLIBridge
+	if cfg.ToolsBridgeDir != "" {
+		toolsBridge = tools.DefaultCLIBridge(cfg.ToolsBridgeDir)
+		srv.SetToolsLister(toolsBridge)
+		toolList, err := toolsBridge.ListTools(context.Background())
+		if err != nil {
+			log.Printf("tools bridge list: %v (using built-in tools only)", err)
+		} else {
+			// Merge bridge tools with built-in (bridge tools override by name)
+			payload.Tools = tools.MergeTools(payload.Tools, toolList)
+		}
+	}
 	reg := heartbeat.NewRegistrar(client, 0, payload)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -53,6 +69,9 @@ func RunDaemon(cfg *config.Config) error {
 
 	// Engine setup
 	skillRunner := engine.NewSkillRunner()
+	if toolsBridge != nil {
+		skillRunner.SetToolExecutor(toolsBridge)
+	}
 	stepExec := engine.NewStepExecutor(client, skillRunner)
 	eng := engine.NewWorkflowEngine(stepExec)
 	execService := executor.NewExecutionService(client, eng, 5*time.Second)

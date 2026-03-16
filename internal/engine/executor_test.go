@@ -284,7 +284,7 @@ func TestStepExecutor_buildInput_includesRunInput(t *testing.T) {
 		Data:     map[string]interface{}{"extra": "data"},
 	}
 
-	input := exec.buildInput(rctx, node)
+	input := exec.buildInput(rctx, node, nil)
 
 	if _, ok := input["_run_input"]; !ok {
 		t.Error("expected '_run_input' key in built input")

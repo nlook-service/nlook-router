@@ -14,9 +14,15 @@ import (
 	"github.com/nlook-service/nlook-router/internal/apiclient"
 )
 
+// ToolExecutor runs a tool by name (e.g. Python bridge). If nil, runTool returns a placeholder.
+type ToolExecutor interface {
+	Execute(ctx context.Context, name string, args map[string]interface{}) ([]byte, error)
+}
+
 // SkillRunner executes workflow skills by type.
 type SkillRunner struct {
-	httpClient *http.Client
+	httpClient   *http.Client
+	toolExecutor ToolExecutor
 }
 
 // NewSkillRunner creates a new SkillRunner.
@@ -24,6 +30,11 @@ func NewSkillRunner() *SkillRunner {
 	return &SkillRunner{
 		httpClient: &http.Client{Timeout: 120 * time.Second},
 	}
+}
+
+// SetToolExecutor sets the bridge for tool execution. If not set, runTool returns a placeholder.
+func (r *SkillRunner) SetToolExecutor(e ToolExecutor) {
+	r.toolExecutor = e
 }
 
 // RunSkill dispatches execution to the appropriate handler based on skill type.
@@ -337,6 +348,22 @@ func (r *SkillRunner) runTool(ctx context.Context, skill *apiclient.WorkflowSkil
 	}
 
 	logs := []string{fmt.Sprintf("tool execution: %s", toolName)}
+
+	if r.toolExecutor != nil {
+		raw, err := r.toolExecutor.Execute(ctx, toolName, input)
+		if err != nil {
+			logs = append(logs, fmt.Sprintf("tool error: %v", err))
+			return map[string]interface{}{
+				"tool": toolName, "error": err.Error(), "input": input,
+			}, logs, nil
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			logs = append(logs, fmt.Sprintf("parse result: %v", err))
+			return map[string]interface{}{"tool": toolName, "raw": string(raw), "input": input}, logs, nil
+		}
+		return out, logs, nil
+	}
 
 	return map[string]interface{}{
 		"tool":    toolName,

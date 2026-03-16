@@ -14,6 +14,9 @@ type Config struct {
 	APIKey   string `yaml:"api_key"`
 	RouterID string `yaml:"router_id"`
 	Port     int    `yaml:"port"`
+
+	// ToolsBridgeDir is the path to the tools-bridge directory (for CLI bridge). If empty, tools list/execute are not available.
+	ToolsBridgeDir string `yaml:"tools_bridge_dir,omitempty"`
 }
 
 // Default returns a config with default values.

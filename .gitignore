@@ -19,3 +19,6 @@ Thumbs.db
 # Test
 coverage.out
 *.test
+
+# Vendor (external agno repo for tools-bridge)
+vendor/

@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: nlook-tools-bridge
+Version: 0.1.0
+Summary: Bridge Agno tools for nlook router (CLI --list, --run)
+Requires-Python: >=3.10
+Requires-Dist: agno>=2.5.0

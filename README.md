@@ -23,6 +23,19 @@ cd nlook-router
 go build -o nlook-router ./cmd/nlook-router
 ```
 
+### Make 실행 시 로컬 요구사항
+
+| 도구 | 용도 |
+|------|------|
+| **make** | Makefile 타깃 실행 (macOS/Linux 기본 또는 `xcode-select --install` / `brew install make`) |
+| **Go** (1.21+) | `make build`, `make test`, `make tools-go-test` |
+| **Git** | `make vendor-agno` (agno 클론) |
+| **Python 3** + **pip** | `make tools-setup`, `make tools-test`, `make tools-go-test` (tools-bridge 사용 시) |
+
+- **라우터만 빌드/실행:** `make build`, `make run` → Go만 있으면 됨.
+- **tools-bridge 연동까지:** `make tools-setup` 또는 `make build-with-tools` → Go, Git, Python3, pip 필요.
+- **전체 테스트:** `make test` (Go만), `make tools-go-test` (Python 환경 필요).
+
 ## Setup
 
 1. Get an API key from [nlook.me](https://nlook.me) → Settings → Routers

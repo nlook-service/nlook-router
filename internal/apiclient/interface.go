@@ -73,10 +73,20 @@ type StepLogRef struct {
 	ID int64 `json:"id"`
 }
 
+// ToolMeta describes a single tool available on the router (e.g. from Agno bridge).
+// Used when sending available tools to the server on register/heartbeat.
+type ToolMeta struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Category    string                 `json:"category,omitempty"`
+	Parameters  map[string]interface{} `json:"parameters,omitempty"`
+}
+
 // RegisterPayload is sent to the server to register this router.
 type RegisterPayload struct {
-	RouterID string `json:"router_id"`
-	Version  string `json:"version"`
+	RouterID string      `json:"router_id"`
+	Version  string      `json:"version"`
+	Tools    []ToolMeta  `json:"tools,omitempty"`
 }
 
 // Schedule represents a workflow schedule from the server.
