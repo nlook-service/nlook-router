@@ -21,6 +21,11 @@ archives:
     format_overrides:
       - goos: windows
         format: zip
+    files:
+      - tools-bridge/tool_bridge/**/*
+      - tools-bridge/requirements.txt
+      - tools-bridge/pyproject.toml
+      - tools-bridge/README.md
 
 checksum:
   name_template: checksums.txt
