@@ -161,27 +161,19 @@ func (s *Scheduler) triggerRun(ctx context.Context, sched *apiclient.Schedule) {
 		input = make(map[string]interface{})
 	}
 
-	if sched.WorkflowID > 0 {
-		// Has workflow — create run via API, router will execute the DAG
-		log.Printf("scheduler: triggering run for schedule %d '%s' (workflow %d)", sched.ID, sched.Name, sched.WorkflowID)
+	log.Printf("scheduler: triggering schedule %d '%s' (workflow %d)", sched.ID, sched.Name, sched.WorkflowID)
 
-		run, err := s.client.CreateRun(ctx, sched.WorkflowID, input, "schedule", sched.ID)
-		if err != nil {
-			log.Printf("scheduler: create run for schedule %d failed: %v", sched.ID, err)
-			return
-		}
+	// Always create run on server (for history tracking in Runs tab)
+	run, err := s.client.CreateRun(ctx, sched.WorkflowID, input, "schedule", sched.ID)
+	if err != nil {
+		log.Printf("scheduler: create run for schedule %d failed: %v", sched.ID, err)
+		return
+	}
 
-		log.Printf("scheduler: run %d created for schedule %d", run.ID, sched.ID)
+	log.Printf("scheduler: run %d created for schedule %d '%s'", run.ID, sched.ID, sched.Name)
 
-		if s.OnRunCreated != nil {
-			s.OnRunCreated(sched.WorkflowID, run.ID, sched.ID)
-		}
-	} else {
-		// No workflow — execute with input only (agent or passthrough)
-		log.Printf("scheduler: triggering schedule %d '%s' (no workflow, input-only)", sched.ID, sched.Name)
-
-		// Log the execution as a standalone task
-		log.Printf("scheduler: schedule %d executed with input: %v", sched.ID, input)
+	if s.OnRunCreated != nil {
+		s.OnRunCreated(sched.WorkflowID, run.ID, sched.ID)
 	}
 }
 
