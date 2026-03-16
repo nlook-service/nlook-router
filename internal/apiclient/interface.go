@@ -57,13 +57,15 @@ type WorkflowAgent struct {
 
 // RunInfo represents a pending workflow run.
 type RunInfo struct {
-	ID         int64                  `json:"id"`
-	WorkflowID int64                  `json:"workflow_id"`
-	UserID     int64                  `json:"user_id"`
-	RunType    string                 `json:"run_type"`
-	AgentID    int64                  `json:"agent_id"`
-	TraceID    string                 `json:"trace_id"`
-	Input      map[string]interface{} `json:"input"`
+	ID          int64                  `json:"id"`
+	WorkflowID  int64                  `json:"workflow_id"`
+	UserID      int64                  `json:"user_id"`
+	RunType     string                 `json:"run_type"`
+	AgentID     int64                  `json:"agent_id"`
+	TraceID     string                 `json:"trace_id"`
+	Input       map[string]interface{} `json:"input"`
+	EndpointURL string                 `json:"endpoint_url,omitempty"`
+	HTTPMethod  string                 `json:"http_method,omitempty"`
 }
 
 // StepLogRef holds the ID of a created step log entry.
@@ -110,4 +112,5 @@ type Interface interface {
 	// Schedule operations
 	GetSchedules(ctx context.Context, workflowID int64) ([]Schedule, error)
 	CreateRun(ctx context.Context, workflowID int64, input map[string]interface{}, triggerType string, scheduleID int64) (*RunInfo, error)
+	CreateRunWithParams(ctx context.Context, params CreateRunParams) (*RunInfo, error)
 }

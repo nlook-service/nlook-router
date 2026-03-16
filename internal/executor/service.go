@@ -1,8 +1,13 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -159,8 +164,7 @@ func (s *ExecutionService) executeRun(ctx context.Context, run apiclient.RunInfo
 	case "agent":
 		s.executeAgentRun(ctx, run)
 	case "api":
-		// API-type runs are handled by the scheduler directly (standalone)
-		log.Printf("executor: skipping run %d (api type, handled by scheduler)", run.ID)
+		s.executeAPIRun(ctx, run)
 	default:
 		log.Printf("executor: unknown run type '%s' for run %d, skipping", runType, run.ID)
 	}
@@ -222,4 +226,75 @@ func (s *ExecutionService) executeAgentRun(ctx context.Context, run apiclient.Ru
 	if updateErr := s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", nil, "agent execution not yet implemented"); updateErr != nil {
 		log.Printf("executor: update agent run %d to failed: %v", run.ID, updateErr)
 	}
+}
+
+func (s *ExecutionService) executeAPIRun(ctx context.Context, run apiclient.RunInfo) {
+	if run.EndpointURL == "" {
+		log.Printf("executor: skipping api run %d (no endpoint_url)", run.ID)
+		return
+	}
+
+	// Mark as running
+	if err := s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "running", nil, ""); err != nil {
+		log.Printf("executor: update api run %d to running: %v", run.ID, err)
+	}
+
+	method := run.HTTPMethod
+	if method == "" {
+		method = "POST"
+	}
+
+	// Build request body from input
+	var body io.Reader
+	if run.Input != nil && (method == "POST" || method == "PUT" || method == "PATCH") {
+		jsonBytes, err := json.Marshal(run.Input)
+		if err != nil {
+			errMsg := fmt.Sprintf("marshal payload: %v", err)
+			log.Printf("executor: api run %d failed: %s", run.ID, errMsg)
+			s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", nil, errMsg)
+			return
+		}
+		body = bytes.NewReader(jsonBytes)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, run.EndpointURL, body)
+	if err != nil {
+		errMsg := fmt.Sprintf("create request: %v", err)
+		log.Printf("executor: api run %d failed: %s", run.ID, errMsg)
+		s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", nil, errMsg)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		errMsg := fmt.Sprintf("http request: %v", err)
+		log.Printf("executor: api run %d failed: %s", run.ID, errMsg)
+		s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", nil, errMsg)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
+	output := map[string]interface{}{
+		"status_code": resp.StatusCode,
+	}
+	var jsonResp interface{}
+	if err := json.Unmarshal(respBody, &jsonResp); err == nil {
+		output["body"] = jsonResp
+	} else {
+		output["body"] = string(respBody)
+	}
+
+	if resp.StatusCode >= 400 {
+		errMsg := fmt.Sprintf("api returned %d", resp.StatusCode)
+		log.Printf("executor: api run %d failed: %s", run.ID, errMsg)
+		s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", output, errMsg)
+		return
+	}
+
+	log.Printf("executor: api run %d completed (%s %s → %d)", run.ID, method, run.EndpointURL, resp.StatusCode)
+	s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "completed", output, "")
 }

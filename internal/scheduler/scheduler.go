@@ -1,8 +1,13 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -185,18 +190,94 @@ func (s *Scheduler) triggerRun(ctx context.Context, sched *apiclient.Schedule) {
 
 	log.Printf("scheduler: run %d created for schedule %d '%s' (type=%s)", run.ID, sched.ID, sched.Name, execType)
 
-	// For API-type schedules without workflow/agent, mark as completed immediately
-	if execType == "api" && sched.WorkflowID == 0 && sched.AgentID == 0 {
-		if err := s.client.UpdateRunStatus(ctx, 0, run.ID, "completed", input, ""); err != nil {
-			log.Printf("scheduler: update run %d status failed: %v", run.ID, err)
-		} else {
-			log.Printf("scheduler: run %d completed (api call)", run.ID)
-		}
+	// For API-type schedules, execute the HTTP call directly
+	if execType == "api" && sched.EndpointURL != "" {
+		go s.executeAPICall(ctx, sched, run)
 	}
 
 	if s.OnRunCreated != nil {
 		s.OnRunCreated(sched.WorkflowID, run.ID, sched.ID)
 	}
+}
+
+// executeAPICall performs the actual HTTP request for API-type schedules.
+func (s *Scheduler) executeAPICall(ctx context.Context, sched *apiclient.Schedule, run *apiclient.RunInfo) {
+	// Mark as running
+	if err := s.client.UpdateRunStatus(ctx, sched.WorkflowID, run.ID, "running", nil, ""); err != nil {
+		log.Printf("scheduler: api run %d update to running failed: %v", run.ID, err)
+	}
+
+	method := sched.HTTPMethod
+	if method == "" {
+		method = "POST"
+	}
+
+	// Build request body from input/payload
+	var body io.Reader
+	if sched.Input != nil && (method == "POST" || method == "PUT" || method == "PATCH") {
+		jsonBytes, err := json.Marshal(sched.Input)
+		if err != nil {
+			errMsg := fmt.Sprintf("marshal payload: %v", err)
+			log.Printf("scheduler: api run %d failed: %s", run.ID, errMsg)
+			s.client.UpdateRunStatus(ctx, sched.WorkflowID, run.ID, "failed", nil, errMsg)
+			return
+		}
+		body = bytes.NewReader(jsonBytes)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, sched.EndpointURL, body)
+	if err != nil {
+		errMsg := fmt.Sprintf("create request: %v", err)
+		log.Printf("scheduler: api run %d failed: %s", run.ID, errMsg)
+		s.client.UpdateRunStatus(ctx, sched.WorkflowID, run.ID, "failed", nil, errMsg)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		errMsg := fmt.Sprintf("http request: %v", err)
+		log.Printf("scheduler: api run %d failed: %s", run.ID, errMsg)
+		s.client.UpdateRunStatus(ctx, sched.WorkflowID, run.ID, "failed", nil, errMsg)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB max
+
+	output := map[string]interface{}{
+		"status_code": resp.StatusCode,
+		"headers":     flattenHeaders(resp.Header),
+	}
+
+	// Try to parse response as JSON
+	var jsonResp interface{}
+	if err := json.Unmarshal(respBody, &jsonResp); err == nil {
+		output["body"] = jsonResp
+	} else {
+		output["body"] = string(respBody)
+	}
+
+	if resp.StatusCode >= 400 {
+		errMsg := fmt.Sprintf("api returned %d", resp.StatusCode)
+		log.Printf("scheduler: api run %d failed: %s", run.ID, errMsg)
+		s.client.UpdateRunStatus(ctx, sched.WorkflowID, run.ID, "failed", output, errMsg)
+		return
+	}
+
+	log.Printf("scheduler: api run %d completed (%s %s → %d)", run.ID, method, sched.EndpointURL, resp.StatusCode)
+	s.client.UpdateRunStatus(ctx, sched.WorkflowID, run.ID, "completed", output, "")
+}
+
+func flattenHeaders(h http.Header) map[string]string {
+	result := make(map[string]string, len(h))
+	for k, v := range h {
+		if len(v) > 0 {
+			result[k] = v[0]
+		}
+	}
+	return result
 }
 
 // ActiveCount returns the number of active scheduled jobs.
