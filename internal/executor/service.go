@@ -148,6 +148,12 @@ func (s *ExecutionService) spawnRun(ctx context.Context, run apiclient.RunInfo) 
 }
 
 func (s *ExecutionService) executeRun(ctx context.Context, run apiclient.RunInfo) {
+	// Skip execution for standalone runs (no workflow attached)
+	if run.WorkflowID == 0 {
+		log.Printf("executor: skipping run %d (standalone, no workflow)", run.ID)
+		return
+	}
+
 	// Mark run as running
 	if err := s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "running", nil, ""); err != nil {
 		log.Printf("executor: update run %d to running: %v", run.ID, err)
