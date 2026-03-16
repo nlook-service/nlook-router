@@ -16,12 +16,13 @@ import (
 	"github.com/nlook-service/nlook-router/internal/engine"
 	"github.com/nlook-service/nlook-router/internal/executor"
 	"github.com/nlook-service/nlook-router/internal/heartbeat"
+	"github.com/nlook-service/nlook-router/internal/scheduler"
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/ws"
 )
 
-const version = "0.2.3"
+const version = "0.2.4"
 
 // RunDaemon starts the local HTTP server, heartbeat loop, WebSocket client, and SSH proxy.
 func RunDaemon(cfg *config.Config) error {
@@ -96,6 +97,10 @@ func RunDaemon(cfg *config.Config) error {
 
 	execService.Start(ctx)
 
+	// Scheduler: polls server for schedules and triggers runs on cron
+	sched := scheduler.New(client, 30*time.Second)
+	sched.Start(ctx)
+
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server: %v", err)
@@ -106,6 +111,7 @@ func RunDaemon(cfg *config.Config) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 	_ = reg.Stop()
+	sched.Stop()
 	execService.Stop()
 	if wsClient != nil {
 		wsClient.Stop()

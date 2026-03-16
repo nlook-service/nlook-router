@@ -74,6 +74,19 @@ type RegisterPayload struct {
 	Version  string `json:"version"`
 }
 
+// Schedule represents a workflow schedule from the server.
+type Schedule struct {
+	ID             int64                  `json:"id"`
+	WorkflowID     int64                  `json:"workflow_id"`
+	Name           string                 `json:"name"`
+	CronExpression string                 `json:"cron_expression"`
+	Timezone       string                 `json:"timezone"`
+	Enabled        bool                   `json:"enabled"`
+	Input          map[string]interface{} `json:"input,omitempty"`
+	NextRunAt      string                 `json:"next_run_at,omitempty"`
+	LastRunAt      string                 `json:"last_run_at,omitempty"`
+}
+
 // Interface defines the nlook API client contract for testing and DI.
 type Interface interface {
 	ListWorkflows(ctx context.Context) ([]Workflow, error)
@@ -86,4 +99,8 @@ type Interface interface {
 	UpdateRunStatus(ctx context.Context, workflowID, runID int64, status string, output map[string]interface{}, errMsg string) error
 	StartStep(ctx context.Context, workflowID, runID int64, nodeID, nodeType string) (*StepLogRef, error)
 	CompleteStep(ctx context.Context, workflowID, runID, logID int64, status string, output map[string]interface{}, errMsg string, logLines []string) error
+
+	// Schedule operations
+	GetSchedules(ctx context.Context, workflowID int64) ([]Schedule, error)
+	CreateRun(ctx context.Context, workflowID int64, input map[string]interface{}, triggerType string, scheduleID int64) (*RunInfo, error)
 }
