@@ -25,6 +25,8 @@ const version = "0.2.0"
 
 // RunDaemon starts the local HTTP server, heartbeat loop, WebSocket client, and SSH proxy.
 func RunDaemon(cfg *config.Config) error {
+	// Check for updates in background (non-blocking)
+	CheckForUpdate()
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	status := &server.Status{
 		RouterID:  cfg.RouterID,
