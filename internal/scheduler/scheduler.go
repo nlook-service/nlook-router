@@ -176,6 +176,7 @@ func (s *Scheduler) triggerRun(ctx context.Context, sched *apiclient.Schedule) {
 
 	// Create run on server with proper execution type
 	run, err := s.client.CreateRunWithParams(ctx, apiclient.CreateRunParams{
+		Name:        sched.Name,
 		WorkflowID:  sched.WorkflowID,
 		Input:       input,
 		TriggerType: "schedule",

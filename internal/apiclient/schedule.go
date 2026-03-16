@@ -40,6 +40,7 @@ func (c *Client) GetAllSchedules(ctx context.Context) ([]Schedule, error) {
 
 // CreateRunParams holds parameters for creating a run.
 type CreateRunParams struct {
+	Name        string
 	WorkflowID  int64
 	Input       map[string]interface{}
 	TriggerType string
@@ -65,6 +66,9 @@ func (c *Client) CreateRunWithParams(ctx context.Context, params CreateRunParams
 	body := map[string]interface{}{
 		"trigger_type": params.TriggerType,
 		"input":        params.Input,
+	}
+	if params.Name != "" {
+		body["name"] = params.Name
 	}
 	if params.RunType != "" {
 		body["run_type"] = params.RunType
