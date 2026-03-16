@@ -148,9 +148,27 @@ func (s *ExecutionService) spawnRun(ctx context.Context, run apiclient.RunInfo) 
 }
 
 func (s *ExecutionService) executeRun(ctx context.Context, run apiclient.RunInfo) {
-	// Skip execution for standalone runs (no workflow attached)
+	runType := run.RunType
+	if runType == "" {
+		runType = "workflow"
+	}
+
+	switch runType {
+	case "workflow":
+		s.executeWorkflowRun(ctx, run)
+	case "agent":
+		s.executeAgentRun(ctx, run)
+	case "api":
+		// API-type runs are handled by the scheduler directly (standalone)
+		log.Printf("executor: skipping run %d (api type, handled by scheduler)", run.ID)
+	default:
+		log.Printf("executor: unknown run type '%s' for run %d, skipping", runType, run.ID)
+	}
+}
+
+func (s *ExecutionService) executeWorkflowRun(ctx context.Context, run apiclient.RunInfo) {
 	if run.WorkflowID == 0 {
-		log.Printf("executor: skipping run %d (standalone, no workflow)", run.ID)
+		log.Printf("executor: skipping workflow run %d (no workflow_id)", run.ID)
 		return
 	}
 
@@ -184,5 +202,24 @@ func (s *ExecutionService) executeRun(ctx context.Context, run apiclient.RunInfo
 	// Mark run as completed
 	if err := s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "completed", output, ""); err != nil {
 		log.Printf("executor: update run %d to completed: %v", run.ID, err)
+	}
+}
+
+func (s *ExecutionService) executeAgentRun(ctx context.Context, run apiclient.RunInfo) {
+	if run.AgentID == 0 {
+		log.Printf("executor: skipping agent run %d (no agent_id)", run.ID)
+		return
+	}
+
+	// Mark run as running
+	if err := s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "running", nil, ""); err != nil {
+		log.Printf("executor: update agent run %d to running: %v", run.ID, err)
+	}
+
+	// TODO: Implement agent execution — fetch agent detail, run LLM call, report metrics
+	log.Printf("executor: agent run %d (agent_id=%d) — agent execution not yet implemented", run.ID, run.AgentID)
+
+	if updateErr := s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", nil, "agent execution not yet implemented"); updateErr != nil {
+		log.Printf("executor: update agent run %d to failed: %v", run.ID, updateErr)
 	}
 }

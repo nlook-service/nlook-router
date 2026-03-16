@@ -60,6 +60,9 @@ type RunInfo struct {
 	ID         int64                  `json:"id"`
 	WorkflowID int64                  `json:"workflow_id"`
 	UserID     int64                  `json:"user_id"`
+	RunType    string                 `json:"run_type"`
+	AgentID    int64                  `json:"agent_id"`
+	TraceID    string                 `json:"trace_id"`
 	Input      map[string]interface{} `json:"input"`
 }
 
@@ -78,6 +81,10 @@ type RegisterPayload struct {
 type Schedule struct {
 	ID             int64                  `json:"id"`
 	WorkflowID     int64                  `json:"workflow_id"`
+	ExecutionType  string                 `json:"execution_type"`
+	AgentID        int64                  `json:"agent_id"`
+	EndpointURL    string                 `json:"endpoint_url"`
+	HTTPMethod     string                 `json:"http_method"`
 	Name           string                 `json:"name"`
 	CronExpression string                 `json:"cron_expression"`
 	Timezone       string                 `json:"timezone"`

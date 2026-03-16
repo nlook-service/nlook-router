@@ -161,23 +161,36 @@ func (s *Scheduler) triggerRun(ctx context.Context, sched *apiclient.Schedule) {
 		input = make(map[string]interface{})
 	}
 
-	log.Printf("scheduler: triggering schedule %d '%s' (workflow %d)", sched.ID, sched.Name, sched.WorkflowID)
+	execType := sched.ExecutionType
+	if execType == "" {
+		execType = "workflow"
+	}
 
-	// Always create run on server (for history tracking in Runs tab)
-	run, err := s.client.CreateRun(ctx, sched.WorkflowID, input, "schedule", sched.ID)
+	log.Printf("scheduler: triggering schedule %d '%s' type=%s (workflow %d, agent %d)",
+		sched.ID, sched.Name, execType, sched.WorkflowID, sched.AgentID)
+
+	// Create run on server with proper execution type
+	run, err := s.client.CreateRunWithParams(ctx, apiclient.CreateRunParams{
+		WorkflowID:  sched.WorkflowID,
+		Input:       input,
+		TriggerType: "schedule",
+		RunType:     execType,
+		AgentID:     sched.AgentID,
+		ScheduleID:  sched.ID,
+	})
 	if err != nil {
 		log.Printf("scheduler: create run for schedule %d failed: %v", sched.ID, err)
 		return
 	}
 
-	log.Printf("scheduler: run %d created for schedule %d '%s'", run.ID, sched.ID, sched.Name)
+	log.Printf("scheduler: run %d created for schedule %d '%s' (type=%s)", run.ID, sched.ID, sched.Name, execType)
 
-	// If no workflow, mark run as completed immediately (standalone execution)
-	if sched.WorkflowID == 0 {
+	// For API-type schedules without workflow/agent, mark as completed immediately
+	if execType == "api" && sched.WorkflowID == 0 && sched.AgentID == 0 {
 		if err := s.client.UpdateRunStatus(ctx, 0, run.ID, "completed", input, ""); err != nil {
 			log.Printf("scheduler: update run %d status failed: %v", run.ID, err)
 		} else {
-			log.Printf("scheduler: run %d completed (standalone)", run.ID)
+			log.Printf("scheduler: run %d completed (api call)", run.ID)
 		}
 	}
 
