@@ -1,0 +1,21 @@
+# Binary
+nlook-router
+/bin/
+/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Config (contains API keys)
+# Note: ~/.nlook/config.yaml is user config, not in repo
+
+# Test
+coverage.out
+*.test
