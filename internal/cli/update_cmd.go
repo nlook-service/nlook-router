@@ -39,18 +39,73 @@ var selfUpdateCmd = &cobra.Command{
 	},
 }
 
-// CheckForUpdate checks GitHub for a newer version and prints a message if available.
-// Called at router start — non-blocking, errors are silently ignored.
+// CheckForUpdate checks GitHub for a newer version.
+// If a new version is found, automatically downloads and replaces the binary,
+// then prompts the user to restart.
 func CheckForUpdate() {
 	go func() {
-		latest, err := getLatestVersion()
-		if err != nil || latest == "" {
+		release, err := getLatestRelease()
+		if err != nil || release == nil {
 			return
 		}
+		latest := release.TagName
 		current := "v" + version
-		if latest != current && latest > current {
-			log.Printf("📦 New version available: %s (current: %s). Run: nlook-router self-update", latest, current)
+		if latest == current || latest <= current {
+			return
 		}
+
+		log.Printf("📦 New version available: %s (current: %s). Auto-updating...", latest, current)
+
+		// Find the right asset
+		assetName := getBinaryAssetName()
+		var downloadURL string
+		for _, asset := range release.Assets {
+			if asset.Name == assetName {
+				downloadURL = asset.BrowserDownloadURL
+				break
+			}
+		}
+		if downloadURL == "" {
+			log.Printf("⚠️  No binary found for %s in release %s. Run: nlook-router self-update", assetName, latest)
+			return
+		}
+
+		// Download to temp file
+		tmpFile, err := os.CreateTemp("", "nlook-router-update-*")
+		if err != nil {
+			log.Printf("⚠️  Auto-update failed: %v", err)
+			return
+		}
+		defer os.Remove(tmpFile.Name())
+
+		if err := downloadFile(downloadURL, tmpFile); err != nil {
+			tmpFile.Close()
+			log.Printf("⚠️  Auto-update download failed: %v", err)
+			return
+		}
+		tmpFile.Close()
+
+		// Replace binary
+		execPath, err := os.Executable()
+		if err != nil {
+			home, _ := os.UserHomeDir()
+			execPath = filepath.Join(home, ".nlook", "bin", "nlook-router")
+		}
+		execPath, _ = filepath.EvalSymlinks(execPath)
+
+		if err := os.Chmod(tmpFile.Name(), 0755); err != nil {
+			log.Printf("⚠️  Auto-update chmod failed: %v", err)
+			return
+		}
+
+		if err := os.Rename(tmpFile.Name(), execPath); err != nil {
+			if err := copyFile(tmpFile.Name(), execPath); err != nil {
+				log.Printf("⚠️  Auto-update replace failed: %v. Run: nlook-router self-update", err)
+				return
+			}
+		}
+
+		log.Printf("✅ Auto-updated to %s. Restart the router to use the new version.", latest)
 	}()
 }
 
