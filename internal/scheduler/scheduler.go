@@ -156,6 +156,11 @@ func (s *Scheduler) sync(ctx context.Context) {
 }
 
 func (s *Scheduler) triggerRun(ctx context.Context, sched *apiclient.Schedule) {
+	if sched.WorkflowID == 0 {
+		log.Printf("scheduler: skipping schedule %d '%s' — no workflow_id", sched.ID, sched.Name)
+		return
+	}
+
 	log.Printf("scheduler: triggering run for schedule %d '%s' (workflow %d)", sched.ID, sched.Name, sched.WorkflowID)
 
 	input := sched.Input

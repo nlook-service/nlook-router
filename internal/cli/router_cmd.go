@@ -183,3 +183,15 @@ func runRouterStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("router_id: %s\nconnected: %v\n", status.RouterID, status.Connected)
 	return nil
 }
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "show nlook-router version",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("nlook-router v%s\n", version)
+	},
+}
+
+func init() {
+	Root().AddCommand(versionCmd)
+}
