@@ -123,4 +123,7 @@ type Interface interface {
 	GetSchedules(ctx context.Context, workflowID int64) ([]Schedule, error)
 	CreateRun(ctx context.Context, workflowID int64, input map[string]interface{}, triggerType string, scheduleID int64) (*RunInfo, error)
 	CreateRunWithParams(ctx context.Context, params CreateRunParams) (*RunInfo, error)
+
+	// Agent operations
+	GetAgentDetail(ctx context.Context, agentID int64) (*WorkflowAgent, error)
 }

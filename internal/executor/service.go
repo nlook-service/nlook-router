@@ -220,12 +220,61 @@ func (s *ExecutionService) executeAgentRun(ctx context.Context, run apiclient.Ru
 		log.Printf("executor: update agent run %d to running: %v", run.ID, err)
 	}
 
-	// TODO: Implement agent execution — fetch agent detail, run LLM call, report metrics
-	log.Printf("executor: agent run %d (agent_id=%d) — agent execution not yet implemented", run.ID, run.AgentID)
-
-	if updateErr := s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", nil, "agent execution not yet implemented"); updateErr != nil {
-		log.Printf("executor: update agent run %d to failed: %v", run.ID, updateErr)
+	// Fetch agent detail from server
+	agent, err := s.client.GetAgentDetail(ctx, run.AgentID)
+	if err != nil {
+		errMsg := fmt.Sprintf("get agent detail: %v", err)
+		log.Printf("executor: agent run %d failed: %s", run.ID, errMsg)
+		s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", nil, errMsg)
+		return
 	}
+
+	log.Printf("executor: agent run %d — agent=%s model=%s", run.ID, agent.Name, agent.Model)
+
+	// Build prompt from run input
+	prompt := ""
+	if run.Input != nil {
+		if text, ok := run.Input["text"].(string); ok {
+			prompt = text
+		} else if msg, ok := run.Input["message"].(string); ok {
+			prompt = msg
+		} else {
+			// Fallback: serialize input as JSON
+			b, _ := json.Marshal(run.Input)
+			prompt = string(b)
+		}
+	}
+
+	if prompt == "" {
+		s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", nil, "no input text provided")
+		return
+	}
+
+	// Create a synthetic skill and run through SkillRunner
+	skill := &apiclient.WorkflowSkill{
+		Name:      agent.Name,
+		SkillType: "prompt",
+		Content:   prompt,
+	}
+
+	output, logs, err := s.engine.SkillRunner().RunSkill(ctx, skill, agent, run.Input)
+	if err != nil {
+		errMsg := fmt.Sprintf("agent execution: %v", err)
+		log.Printf("executor: agent run %d failed: %s", run.ID, errMsg)
+		s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", nil, errMsg)
+		return
+	}
+
+	// Add logs to output
+	if output == nil {
+		output = make(map[string]interface{})
+	}
+	if len(logs) > 0 {
+		output["_logs"] = logs
+	}
+
+	log.Printf("executor: agent run %d completed (agent=%s)", run.ID, agent.Name)
+	s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "completed", output, "")
 }
 
 func (s *ExecutionService) executeAPIRun(ctx context.Context, run apiclient.RunInfo) {

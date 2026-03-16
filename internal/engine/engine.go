@@ -22,6 +22,11 @@ func NewWorkflowEngine(executor *StepExecutor) *WorkflowEngine {
 	}
 }
 
+// SkillRunner returns the underlying skill runner for direct agent execution.
+func (e *WorkflowEngine) SkillRunner() *SkillRunner {
+	return e.executor.skillRunner
+}
+
 // Execute runs the workflow synchronously and returns the final output.
 // Status updates (running/completed/failed) are reported via apiclient.
 func (e *WorkflowEngine) Execute(ctx context.Context, detail *apiclient.WorkflowDetail, run apiclient.RunInfo) (map[string]interface{}, error) {
