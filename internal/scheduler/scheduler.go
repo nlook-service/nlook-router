@@ -172,6 +172,15 @@ func (s *Scheduler) triggerRun(ctx context.Context, sched *apiclient.Schedule) {
 
 	log.Printf("scheduler: run %d created for schedule %d '%s'", run.ID, sched.ID, sched.Name)
 
+	// If no workflow, mark run as completed immediately (standalone execution)
+	if sched.WorkflowID == 0 {
+		if err := s.client.UpdateRunStatus(ctx, 0, run.ID, "completed", input, ""); err != nil {
+			log.Printf("scheduler: update run %d status failed: %v", run.ID, err)
+		} else {
+			log.Printf("scheduler: run %d completed (standalone)", run.ID)
+		}
+	}
+
 	if s.OnRunCreated != nil {
 		s.OnRunCreated(sched.WorkflowID, run.ID, sched.ID)
 	}
