@@ -273,9 +273,15 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		ollamaClient := ollama.NewClient()
 		if ollamaClient.IsRunning(ctx) {
 			models, _ := ollamaClient.List(ctx)
-			if len(models) > 0 {
-				model = models[0].Name
+			// Skip embedding-only models
+			for _, m := range models {
+				name := strings.ToLower(m.Name)
+				if strings.Contains(name, "embed") || strings.Contains(name, "nomic") {
+					continue
+				}
+				model = m.Name
 				log.Printf("chat: using local model %s", model)
+				break
 			}
 		}
 	}
