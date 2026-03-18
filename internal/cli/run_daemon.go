@@ -115,7 +115,7 @@ func RunDaemon(cfg *config.Config) error {
 				defer llmEngine.Stop()
 			}
 		}
-		_ = llmEngine // Available for future use in chat handler
+		// llmEngine will be passed to chat handler below
 
 		// Cache store for user data (documents, tasks)
 		cacheStore := cache.NewStore()
@@ -134,6 +134,7 @@ func RunDaemon(cfg *config.Config) error {
 		chatHandler.SetCacheStore(cacheStore)
 		chatHandler.SetVectorStore(vectorStore)
 		chatHandler.SetMemoryStore(memoryStore)
+		chatHandler.SetLLMEngine(llmEngine)
 
 		// Wire SSH messages from cloud → SSH proxy
 		sshHandler := sshproxy.NewHandler(sshProxy, func(msg []byte) {

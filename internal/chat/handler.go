@@ -17,6 +17,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/cache"
 	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/engine"
+	"github.com/nlook-service/nlook-router/internal/llm"
 	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/ollama"
@@ -78,8 +79,14 @@ type Handler struct {
 	cacheStore    *cache.Store
 	vectorStore   *embedding.VectorStore
 	memoryStore   *memory.Store
+	llmEngine     *llm.Engine
 	promptBuilder *PromptBuilder
 	sendWS        func(msg []byte)
+}
+
+// SetLLMEngine sets the LLM engine (vLLM or Ollama).
+func (h *Handler) SetLLMEngine(e *llm.Engine) {
+	h.llmEngine = e
 }
 
 // SetCacheStore sets the data cache for AI context.
@@ -268,29 +275,6 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		model = os.Getenv("NLOOK_AI_MODEL")
 	}
 
-	// Auto-detect: if no model specified, try Ollama first
-	if model == "" {
-		ollamaClient := ollama.NewClient()
-		if ollamaClient.IsRunning(ctx) {
-			models, _ := ollamaClient.List(ctx)
-			// Skip embedding-only models
-			for _, m := range models {
-				name := strings.ToLower(m.Name)
-				if strings.Contains(name, "embed") || strings.Contains(name, "nomic") {
-					continue
-				}
-				model = m.Name
-				log.Printf("chat: using local model %s", model)
-				break
-			}
-		}
-	}
-
-	// Fallback to Claude
-	if model == "" {
-		model = "claude-sonnet-4-20250514"
-	}
-
 	// Intent detection: directly call MCP tools without relying on model
 	if h.mcpClient != nil {
 		// 1. Fetch referenced document/task content
@@ -308,22 +292,45 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		}
 	}
 
-	// Local model → stream via Ollama
+	// 1. vLLM (우선) — 고성능 배치 처리
+	if h.llmEngine != nil && h.llmEngine.Type() == llm.EngineVLLM && h.llmEngine.IsRunning(ctx) {
+		if model == "" {
+			model = h.llmEngine.Model()
+		}
+		return h.processChatVLLM(ctx, req, model)
+	}
+
+	// 2. Ollama — 로컬 모델
+	if model == "" {
+		ollamaClient := ollama.NewClient()
+		if ollamaClient.IsRunning(ctx) {
+			models, _ := ollamaClient.List(ctx)
+			for _, m := range models {
+				name := strings.ToLower(m.Name)
+				if strings.Contains(name, "embed") || strings.Contains(name, "nomic") {
+					continue
+				}
+				model = m.Name
+				log.Printf("chat: using local model %s", model)
+				break
+			}
+		}
+	}
+
+	// 3. Claude API 폴백
+	if model == "" {
+		model = "claude-sonnet-4-20250514"
+	}
+
 	if isLocalModel(model) {
 		return h.processChatOllama(ctx, req, model)
 	}
-
-	// Claude with MCP tools
 	if h.mcpClient != nil && isClaudeModel(model) {
 		return h.processChatWithTools(ctx, req, model)
 	}
-
-	// Claude without MCP: use streaming
 	if isClaudeModel(model) {
 		return h.processChatStream(ctx, req, model)
 	}
-
-	// Other models: simple LLM call
 	return h.processChatSimple(ctx, req, model)
 }
 
@@ -423,6 +430,42 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 		Content:        content,
 		Model:          model,
 		Role:           "assistant",
+	}, nil
+}
+
+// processChatVLLM uses vLLM with OpenAI-compatible streaming.
+func (h *Handler) processChatVLLM(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
+	systemPrompt := h.getSystemPrompt(req.Lang, req.Query, req.ConversationID)
+
+	// Build messages with history
+	messages := make([]map[string]string, 0)
+	for _, m := range req.History {
+		messages = append(messages, map[string]string{"role": m.Role, "content": m.Content})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": req.Query})
+
+	fullText, err := h.llmEngine.ChatStream(ctx, model, systemPrompt, messages,
+		func(text string) {
+			h.sendResponse("chat:delta", ChatDeltaPayload{
+				ConversationID: req.ConversationID,
+				MessageID:      req.MessageID,
+				Delta:          text,
+				Done:           false,
+			})
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("vLLM chat: %w", err)
+	}
+
+	h.sendResponse("chat:delta", ChatDeltaPayload{
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Delta: "", Done: true, FullContent: fullText, Model: model,
+	})
+
+	return &ChatResponsePayload{
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Content: fullText, Model: model, Role: "assistant",
 	}, nil
 }
 

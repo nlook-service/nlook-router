@@ -49,18 +49,25 @@ func NewEngine() *Engine {
 		return e
 	}
 
-	// Check for managed vLLM (auto-start)
-	if os.Getenv("NLOOK_LLM_ENGINE") == "vllm" {
-		e.engineType = EngineVLLM
-		e.baseURL = "http://localhost:18000"
-		e.model = os.Getenv("NLOOK_AI_MODEL")
-		if e.model == "" {
-			e.model = "Qwen/Qwen3-8B"
+	// Check for managed vLLM (explicit or auto-detect)
+	engineEnv := os.Getenv("NLOOK_LLM_ENGINE")
+	if engineEnv == "vllm" || engineEnv == "" {
+		// Auto-detect: check if vllm binary exists
+		if engineEnv == "vllm" || isVLLMInstalled() {
+			if engineEnv == "vllm" || engineEnv == "" {
+				e.engineType = EngineVLLM
+				e.baseURL = "http://localhost:18000"
+				e.model = os.Getenv("NLOOK_AI_MODEL")
+				if e.model == "" {
+					e.model = "Qwen/Qwen3-8B"
+				}
+				log.Printf("llm: vLLM detected, using as default engine")
+				return e
+			}
 		}
-		return e
 	}
 
-	// Default: Ollama
+	// Fallback: Ollama
 	e.engineType = EngineOllama
 	e.baseURL = os.Getenv("OLLAMA_BASE_URL")
 	if e.baseURL == "" {
@@ -272,6 +279,12 @@ func (e *Engine) ChatStream(ctx context.Context, model, system string, messages 
 done:
 	_ = decoder
 	return fullText.String(), nil
+}
+
+// isVLLMInstalled checks if vllm binary/command is available.
+func isVLLMInstalled() bool {
+	_, err := exec.LookPath("vllm")
+	return err == nil
 }
 
 func truncate(s string, maxLen int) string {
