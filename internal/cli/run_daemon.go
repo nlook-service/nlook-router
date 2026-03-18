@@ -21,6 +21,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/chat"
 	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/llm"
+	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
@@ -129,8 +130,10 @@ func RunDaemon(cfg *config.Config) error {
 		chatHandler := chat.NewHandler(skillRunner, func(msg []byte) {
 			wsClient.Send(msg)
 		})
+		memoryStore := memory.NewStore()
 		chatHandler.SetCacheStore(cacheStore)
 		chatHandler.SetVectorStore(vectorStore)
+		chatHandler.SetMemoryStore(memoryStore)
 
 		// Wire SSH messages from cloud → SSH proxy
 		sshHandler := sshproxy.NewHandler(sshProxy, func(msg []byte) {

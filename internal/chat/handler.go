@@ -18,6 +18,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/engine"
 	"github.com/nlook-service/nlook-router/internal/mcp"
+	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/ollama"
 )
 
@@ -72,21 +73,35 @@ type ChatErrorPayload struct {
 
 // Handler processes chat-related WebSocket messages.
 type Handler struct {
-	skillRunner *engine.SkillRunner
-	mcpClient   *mcp.Client
-	cacheStore  *cache.Store
-	vectorStore *embedding.VectorStore
-	sendWS      func(msg []byte)
+	skillRunner   *engine.SkillRunner
+	mcpClient     *mcp.Client
+	cacheStore    *cache.Store
+	vectorStore   *embedding.VectorStore
+	memoryStore   *memory.Store
+	promptBuilder *PromptBuilder
+	sendWS        func(msg []byte)
 }
 
 // SetCacheStore sets the data cache for AI context.
 func (h *Handler) SetCacheStore(store *cache.Store) {
 	h.cacheStore = store
+	h.rebuildPromptBuilder()
 }
 
 // SetVectorStore sets the embedding vector store for semantic search.
 func (h *Handler) SetVectorStore(vs *embedding.VectorStore) {
 	h.vectorStore = vs
+	h.rebuildPromptBuilder()
+}
+
+// SetMemoryStore sets the long-term memory store.
+func (h *Handler) SetMemoryStore(ms *memory.Store) {
+	h.memoryStore = ms
+	h.rebuildPromptBuilder()
+}
+
+func (h *Handler) rebuildPromptBuilder() {
+	h.promptBuilder = NewPromptBuilder(h.cacheStore, h.vectorStore, h.memoryStore)
 }
 
 // NewHandler creates a new chat message handler.
@@ -157,47 +172,19 @@ Intent classification:
 
 Always confirm before creating/modifying content. Respond concisely.`
 
-func (h *Handler) getSystemPrompt(lang string, query string) string {
-	if lang == "" {
-		lang = detectLang(query)
+func (h *Handler) getSystemPrompt(lang string, query string, conversationID int64) string {
+	if h.promptBuilder != nil {
+		return h.promptBuilder.BuildSystemPrompt(lang, query, conversationID)
 	}
+	// Fallback if no prompt builder
+	return baseSystemPrompt
+}
 
-	prompt := baseSystemPrompt
-
-	// Semantic search: find relevant docs via embeddings first
-	if h.vectorStore != nil {
-		results := h.vectorStore.Search(context.Background(), query, 5)
-		if len(results) > 0 {
-			prompt += "\n\n--- Relevant Content (semantic search) ---\n"
-			for _, r := range results {
-				content := r.Entry.Content
-				if len(content) > 2000 {
-					content = content[:2000] + "..."
-				}
-				prompt += fmt.Sprintf("\n## %s (score: %.2f)\n%s\n", r.Entry.Title, r.Score, content)
-			}
-			prompt += "--- End ---\n"
-		}
+func (h *Handler) getHistory(req *ChatRequestPayload) []ollama.MessageEntry {
+	if h.promptBuilder != nil {
+		return h.promptBuilder.BuildHistory(req.History)
 	}
-
-	// Fallback: keyword search from cache
-	if h.cacheStore != nil {
-		if ctx := h.cacheStore.BuildContextForQuery(query); ctx != "" {
-			prompt += ctx
-		} else if summary := h.cacheStore.Summary(); summary != "" {
-			prompt += summary
-		}
-	}
-
-	switch lang {
-	case "ko":
-		prompt += "\n\nCRITICAL: You MUST respond ONLY in Korean (한국어). 절대로 중국어, 영어 등 다른 언어를 사용하지 마세요. 반드시 한국어로만 답변하세요."
-	case "en":
-		prompt += "\n\nCRITICAL: You MUST respond ONLY in English. Never use any other language."
-	default:
-		prompt += "\n\nCRITICAL: Respond ONLY in the same language the user writes in. Never mix languages. Never use Chinese unless the user writes in Chinese."
-	}
-	return prompt
+	return h.getOllamaHistory(req)
 }
 
 // detectLang detects language from text (simple heuristic).
@@ -339,7 +326,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 	}
 
 	// First LLM call
-	respBody, err := h.callAnthropic(ctx, apiKey, model, h.getSystemPrompt(req.Lang, req.Query), messages, anthropicTools)
+	respBody, err := h.callAnthropic(ctx, apiKey, model, h.getSystemPrompt(req.Lang, req.Query, req.ConversationID), messages, anthropicTools)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +380,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 		)
 
 		// Second call without tools (get final text response)
-		finalResp, err := h.callAnthropic(ctx, apiKey, model, h.getSystemPrompt(req.Lang, req.Query), messages, nil)
+		finalResp, err := h.callAnthropic(ctx, apiKey, model, h.getSystemPrompt(req.Lang, req.Query, req.ConversationID), messages, nil)
 		if err != nil {
 			return nil, fmt.Errorf("follow-up LLM call: %w", err)
 		}
@@ -419,7 +406,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 // processChatOllama uses local Ollama with tool calling + streaming.
 func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	ollamaClient := ollama.NewClient()
-	systemPrompt := h.getSystemPrompt(req.Lang, req.Query)
+	systemPrompt := h.getSystemPrompt(req.Lang, req.Query, req.ConversationID)
 
 	// If MCP client available, try tool calling first (non-streaming)
 	if h.mcpClient != nil {
@@ -521,7 +508,7 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 func (h *Handler) processChatSimple(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	output, _, err := h.skillRunner.RunSkill(ctx,
 		&apiclient.WorkflowSkill{Name: "chat", SkillType: "prompt", Content: req.Query},
-		&apiclient.WorkflowAgent{Model: model, SystemPrompt: h.getSystemPrompt(req.Lang, req.Query), MaxTokens: 4096, Temperature: 0.7},
+		&apiclient.WorkflowAgent{Model: model, SystemPrompt: h.getSystemPrompt(req.Lang, req.Query, req.ConversationID), MaxTokens: 4096, Temperature: 0.7},
 		nil,
 	)
 	if err != nil {
@@ -553,7 +540,7 @@ func (h *Handler) processChatStream(ctx context.Context, req *ChatRequestPayload
 	reqBody := anthropicRequest{
 		Model:       model,
 		MaxTokens:   4096,
-		System:      h.getSystemPrompt(req.Lang, req.Query),
+		System:      h.getSystemPrompt(req.Lang, req.Query, req.ConversationID),
 		Messages:    []map[string]interface{}{{"role": "user", "content": req.Query}},
 		Temperature: 0.7,
 		Stream:      true,
