@@ -20,6 +20,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/cache"
 	"github.com/nlook-service/nlook-router/internal/chat"
 	"github.com/nlook-service/nlook-router/internal/embedding"
+	"github.com/nlook-service/nlook-router/internal/llm"
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
@@ -103,6 +104,17 @@ func RunDaemon(cfg *config.Config) error {
 			log.Printf("ws: received run cancel: run_id=%d", runID)
 			execService.CancelRun(runID)
 		}
+
+		// LLM engine (auto-detect vLLM or Ollama)
+		llmEngine := llm.NewEngine()
+		if llmEngine.Type() == llm.EngineVLLM {
+			if err := llmEngine.StartManaged(ctx); err != nil {
+				log.Printf("llm: failed to start vLLM: %v (falling back to Ollama)", err)
+			} else {
+				defer llmEngine.Stop()
+			}
+		}
+		_ = llmEngine // Available for future use in chat handler
 
 		// Cache store for user data (documents, tasks)
 		cacheStore := cache.NewStore()

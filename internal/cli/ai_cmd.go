@@ -14,6 +14,7 @@ import (
 )
 
 var modelFlag string
+var engineFlag string
 
 var aiCmd = &cobra.Command{
 	Use:   "ai",
@@ -39,10 +40,68 @@ var aiRemoveCmd = &cobra.Command{
 	RunE:  runAIRemove,
 }
 
+var aiSetupVLLMCmd = &cobra.Command{
+	Use:   "setup-vllm",
+	Short: "Install vLLM engine for high-performance multi-agent inference",
+	RunE:  runAISetupVLLM,
+}
+
 func init() {
 	aiSetupCmd.Flags().StringVar(&modelFlag, "model", "qwen3:8b", "model to download")
-	aiCmd.AddCommand(aiSetupCmd, aiListCmd, aiRemoveCmd)
+	aiSetupVLLMCmd.Flags().StringVar(&modelFlag, "model", "Qwen/Qwen3-8B", "HuggingFace model for vLLM")
+	aiCmd.AddCommand(aiSetupCmd, aiSetupVLLMCmd, aiListCmd, aiRemoveCmd)
 	rootCmd.AddCommand(aiCmd)
+}
+
+func runAISetupVLLM(cmd *cobra.Command, args []string) error {
+	fmt.Println()
+	fmt.Println("  ╭─────────────────────────────────────╮")
+	fmt.Println("  │  nlook AI Setup (vLLM)              │")
+	fmt.Println("  │  High-performance multi-agent AI    │")
+	fmt.Println("  ╰─────────────────────────────────────╯")
+	fmt.Println()
+
+	// Step 1: Check Python/pip
+	fmt.Println("  [1/3] Checking Python environment...")
+	if _, err := exec.LookPath("python3"); err != nil {
+		fmt.Println("  ✗ Python3 not found. Install Python 3.10+ first.")
+		return nil
+	}
+	fmt.Println("  ✓ Python3 found")
+
+	// Step 2: Install vLLM
+	fmt.Println()
+	fmt.Println("  [2/3] Installing vLLM...")
+	installCmd := exec.Command("pip", "install", "vllm")
+	installCmd.Stdout = os.Stdout
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		fmt.Printf("  ✗ Failed to install vLLM: %v\n", err)
+		fmt.Println("  → Try: pip install vllm")
+		return nil
+	}
+	fmt.Println("  ✓ vLLM installed")
+
+	// Step 3: Config
+	fmt.Println()
+	fmt.Println("  [3/3] Configuration")
+	fmt.Println()
+	fmt.Println("  ✓ Setup complete!")
+	fmt.Println()
+	fmt.Println("  ╭──────────────────────────────────────────╮")
+	fmt.Printf("  │  Model:   %-31s │\n", modelFlag)
+	fmt.Println("  │  Engine:  vLLM                           │")
+	fmt.Println("  │                                          │")
+	fmt.Println("  │  Start:                                  │")
+	fmt.Println("  │  NLOOK_LLM_ENGINE=vllm \\                │")
+	fmt.Println("  │    nlook-router router start             │")
+	fmt.Println("  │                                          │")
+	fmt.Println("  │  Or set in ~/.nlook/config.yaml:         │")
+	fmt.Println("  │    llm_engine: vllm                      │")
+	fmt.Printf("  │    ai_model: %-28s │\n", modelFlag)
+	fmt.Println("  ╰──────────────────────────────────────────╯")
+	fmt.Println()
+	return nil
 }
 
 func runAISetup(cmd *cobra.Command, args []string) error {
