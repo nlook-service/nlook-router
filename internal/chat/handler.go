@@ -157,9 +157,11 @@ func (h *Handler) getSystemPrompt(lang string, query string) string {
 
 	prompt := baseSystemPrompt
 
-	// Add cached user data context
+	// NotebookLM-style: inject relevant document/task content based on query
 	if h.cacheStore != nil {
-		if summary := h.cacheStore.Summary(); summary != "" {
+		if context := h.cacheStore.BuildContextForQuery(query); context != "" {
+			prompt += context
+		} else if summary := h.cacheStore.Summary(); summary != "" {
 			prompt += summary
 		}
 	}
