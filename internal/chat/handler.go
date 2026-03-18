@@ -18,6 +18,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/engine"
 	"github.com/nlook-service/nlook-router/internal/llm"
+	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/ollama"
@@ -80,6 +81,7 @@ type Handler struct {
 	vectorStore   *embedding.VectorStore
 	memoryStore   *memory.Store
 	llmEngine     *llm.Engine
+	toolExecutor  tools.Executor
 	promptBuilder *PromptBuilder
 	sendWS        func(msg []byte)
 }
@@ -87,6 +89,11 @@ type Handler struct {
 // SetLLMEngine sets the LLM engine (vLLM or Ollama).
 func (h *Handler) SetLLMEngine(e *llm.Engine) {
 	h.llmEngine = e
+}
+
+// SetToolExecutor sets the built-in tool executor (web_search, code_interpreter, etc.)
+func (h *Handler) SetToolExecutor(e tools.Executor) {
+	h.toolExecutor = e
 }
 
 // SetCacheStore sets the data cache for AI context.
@@ -310,7 +317,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 				Done:           false,
 			})
 
-			toolResult := ExecuteIntent(ctx, intent, h.mcpClient)
+			toolResult := ExecuteIntent(ctx, intent, h.mcpClient, h.toolExecutor)
 			if toolResult != "" {
 				req.Query = fmt.Sprintf("%s\n\n[Tool Result: %s]\n%s\n[End Tool Result]\n\nAbove is the data. Present it clearly and concisely to the user.", req.Query, intent.Action, toolResult)
 			}

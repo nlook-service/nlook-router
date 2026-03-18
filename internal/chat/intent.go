@@ -10,6 +10,11 @@ import (
 	"github.com/nlook-service/nlook-router/internal/mcp"
 )
 
+// Executor is a tool executor interface (matches tools.Executor).
+type Executor interface {
+	Execute(ctx context.Context, name string, args map[string]interface{}) ([]byte, error)
+}
+
 // Intent represents a detected user intent.
 type Intent struct {
 	Action string // "list_tasks", "list_documents", "create_task", etc.
@@ -65,13 +70,48 @@ func DetectIntent(query string) *Intent {
 		return &Intent{Action: "list_documents", Query: query}
 	}
 
+	// Web search
+	searchKeywords := []string{"날씨", "검색", "찾아", "뉴스", "weather", "search", "find", "google", "최신", "현재"}
+	if containsAny(q, searchKeywords) {
+		return &Intent{Action: "web_search", Query: query}
+	}
+
+	// Calculator
+	calcKeywords := []string{"계산", "calculate", "몇", "합계", "평균"}
+	if containsAny(q, calcKeywords) {
+		return &Intent{Action: "calculator", Query: query}
+	}
+
 	return nil
 }
 
-// ExecuteIntent calls MCP tool directly based on detected intent.
-// Returns formatted result string, or empty if intent is nil or execution fails.
-func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client) string {
-	if intent == nil || mcpClient == nil {
+// ExecuteIntent calls MCP tool or built-in tool based on detected intent.
+func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, toolExec Executor) string {
+	if intent == nil {
+		return ""
+	}
+
+	// Built-in tool execution (web_search, calculator, etc.)
+	if intent.Action == "web_search" || intent.Action == "calculator" {
+		if toolExec == nil {
+			log.Printf("intent: ⚠ no tool executor for %s", intent.Action)
+			return ""
+		}
+		log.Printf("intent: 🔧 calling built-in tool: %s", intent.Action)
+		result, err := toolExec.Execute(ctx, intent.Action, map[string]interface{}{"query": intent.Query})
+		if err != nil {
+			log.Printf("intent: ✗ tool exec failed: %v", err)
+			return fmt.Sprintf("[도구 오류: %v]", err)
+		}
+		log.Printf("intent: ✓ tool result size=%d bytes", len(result))
+		resultStr := string(result)
+		if len(resultStr) > 3000 {
+			resultStr = resultStr[:3000] + "..."
+		}
+		return resultStr
+	}
+
+	if mcpClient == nil {
 		return ""
 	}
 

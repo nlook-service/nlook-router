@@ -135,6 +135,10 @@ func RunDaemon(cfg *config.Config) error {
 		chatHandler.SetVectorStore(vectorStore)
 		chatHandler.SetMemoryStore(memoryStore)
 		chatHandler.SetLLMEngine(llmEngine)
+		if toolsBridge != nil {
+			chatHandler.SetToolExecutor(toolsBridge)
+			log.Printf("chat: built-in tools connected (web_search, code_interpreter, etc.)")
+		}
 
 		// Wire SSH messages from cloud → SSH proxy
 		sshHandler := sshproxy.NewHandler(sshProxy, func(msg []byte) {
