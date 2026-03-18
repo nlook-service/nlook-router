@@ -19,6 +19,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/scheduler"
 	"github.com/nlook-service/nlook-router/internal/cache"
 	"github.com/nlook-service/nlook-router/internal/chat"
+	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
@@ -107,11 +108,17 @@ func RunDaemon(cfg *config.Config) error {
 		cacheStore := cache.NewStore()
 		syncHandler := cache.NewSyncHandler(cacheStore)
 
+		// Embedding vector store for semantic search
+		embedder := embedding.NewEmbedder()
+		vectorStore := embedding.NewVectorStore(embedder)
+		syncHandler.SetVectorStore(vectorStore)
+
 		// Wire chat messages from cloud → chat handler
 		chatHandler := chat.NewHandler(skillRunner, func(msg []byte) {
 			wsClient.Send(msg)
 		})
 		chatHandler.SetCacheStore(cacheStore)
+		chatHandler.SetVectorStore(vectorStore)
 
 		// Wire SSH messages from cloud → SSH proxy
 		sshHandler := sshproxy.NewHandler(sshProxy, func(msg []byte) {

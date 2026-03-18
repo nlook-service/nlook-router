@@ -15,6 +15,7 @@ import (
 
 	"github.com/nlook-service/nlook-router/internal/apiclient"
 	"github.com/nlook-service/nlook-router/internal/cache"
+	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/engine"
 	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/ollama"
@@ -74,12 +75,18 @@ type Handler struct {
 	skillRunner *engine.SkillRunner
 	mcpClient   *mcp.Client
 	cacheStore  *cache.Store
+	vectorStore *embedding.VectorStore
 	sendWS      func(msg []byte)
 }
 
 // SetCacheStore sets the data cache for AI context.
 func (h *Handler) SetCacheStore(store *cache.Store) {
 	h.cacheStore = store
+}
+
+// SetVectorStore sets the embedding vector store for semantic search.
+func (h *Handler) SetVectorStore(vs *embedding.VectorStore) {
+	h.vectorStore = vs
 }
 
 // NewHandler creates a new chat message handler.
@@ -157,10 +164,26 @@ func (h *Handler) getSystemPrompt(lang string, query string) string {
 
 	prompt := baseSystemPrompt
 
-	// NotebookLM-style: inject relevant document/task content based on query
+	// Semantic search: find relevant docs via embeddings first
+	if h.vectorStore != nil {
+		results := h.vectorStore.Search(context.Background(), query, 5)
+		if len(results) > 0 {
+			prompt += "\n\n--- Relevant Content (semantic search) ---\n"
+			for _, r := range results {
+				content := r.Entry.Content
+				if len(content) > 2000 {
+					content = content[:2000] + "..."
+				}
+				prompt += fmt.Sprintf("\n## %s (score: %.2f)\n%s\n", r.Entry.Title, r.Score, content)
+			}
+			prompt += "--- End ---\n"
+		}
+	}
+
+	// Fallback: keyword search from cache
 	if h.cacheStore != nil {
-		if context := h.cacheStore.BuildContextForQuery(query); context != "" {
-			prompt += context
+		if ctx := h.cacheStore.BuildContextForQuery(query); ctx != "" {
+			prompt += ctx
 		} else if summary := h.cacheStore.Summary(); summary != "" {
 			prompt += summary
 		}

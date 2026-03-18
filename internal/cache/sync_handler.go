@@ -1,19 +1,28 @@
 package cache
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"time"
+
+	"github.com/nlook-service/nlook-router/internal/embedding"
 )
 
 // SyncHandler processes sync WebSocket messages and updates the cache store.
 type SyncHandler struct {
-	store *Store
+	store       *Store
+	vectorStore *embedding.VectorStore
 }
 
 // NewSyncHandler creates a sync handler.
 func NewSyncHandler(store *Store) *SyncHandler {
 	return &SyncHandler{store: store}
+}
+
+// SetVectorStore enables embedding generation on sync.
+func (h *SyncHandler) SetVectorStore(vs *embedding.VectorStore) {
+	h.vectorStore = vs
 }
 
 // HandleMessage processes sync messages. Returns true if handled.
@@ -61,6 +70,11 @@ func (h *SyncHandler) handleDocumentSync(payload json.RawMessage) {
 		UpdatedAt: updatedAt,
 	})
 	log.Printf("sync: cached document id=%d title=%s", doc.ID, doc.Title)
+
+	// Generate embedding in background
+	if h.vectorStore != nil {
+		go h.vectorStore.Upsert(context.Background(), "document", doc.ID, doc.Title, doc.Content)
+	}
 }
 
 func (h *SyncHandler) handleDocumentDelete(payload json.RawMessage) {
@@ -71,6 +85,9 @@ func (h *SyncHandler) handleDocumentDelete(payload json.RawMessage) {
 		return
 	}
 	h.store.RemoveDocument(msg.ID)
+	if h.vectorStore != nil {
+		h.vectorStore.Remove("document", msg.ID)
+	}
 	log.Printf("sync: removed document id=%d", msg.ID)
 }
 
@@ -100,6 +117,10 @@ func (h *SyncHandler) handleTaskSync(payload json.RawMessage) {
 		UpdatedAt: updatedAt,
 	})
 	log.Printf("sync: cached task id=%d title=%s status=%s", task.ID, task.Title, task.Status)
+
+	if h.vectorStore != nil {
+		go h.vectorStore.Upsert(context.Background(), "task", task.ID, task.Title, task.Notes)
+	}
 }
 
 func (h *SyncHandler) handleTaskDelete(payload json.RawMessage) {
@@ -110,6 +131,9 @@ func (h *SyncHandler) handleTaskDelete(payload json.RawMessage) {
 		return
 	}
 	h.store.RemoveTask(msg.ID)
+	if h.vectorStore != nil {
+		h.vectorStore.Remove("task", msg.ID)
+	}
 	log.Printf("sync: removed task id=%d", msg.ID)
 }
 

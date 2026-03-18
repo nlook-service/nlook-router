@@ -114,7 +114,7 @@ func runAISetup(cmd *cobra.Command, args []string) error {
 
 	// Step 3: Pull model
 	fmt.Println()
-	fmt.Printf("  [3/3] Downloading model: %s\n", modelFlag)
+	fmt.Printf("  [3/4] Downloading model: %s\n", modelFlag)
 
 	lastStatus := ""
 	err := client.Pull(ctx, modelFlag, func(status string, completed, total int64) {
@@ -134,6 +134,19 @@ func runAISetup(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n  ❌ Failed to download model: %v\n", err)
 		return nil
 	}
+
+	// Step 4: Pull embedding model for semantic search
+	fmt.Println()
+	fmt.Println("  [4/4] Downloading embedding model: nomic-embed-text")
+	_ = client.Pull(ctx, "nomic-embed-text", func(status string, completed, total int64) {
+		if strings.HasPrefix(status, "pulling") && total > 0 {
+			pct := float64(completed) / float64(total) * 100
+			bar := progressBar(pct, 30)
+			fmt.Printf("\r  ▸ Downloading %s %.0f%%  ", bar, pct)
+		}
+	})
+	fmt.Println()
+	fmt.Println("  ✓ Embedding model ready")
 
 	// Get model info
 	models, _ := client.List(ctx)
