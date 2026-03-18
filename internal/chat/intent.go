@@ -22,12 +22,10 @@ func DetectIntent(query string) *Intent {
 	q := strings.ToLower(query)
 
 	// Task-related
-	taskKeywords := []string{"할일", "할 일", "todo", "task", "일정", "작업", "해야 할"}
-	listKeywords := []string{"뭐", "목록", "리스트", "보여", "확인", "조회", "알려", "있어", "있지", "list", "show", "what"}
-	createKeywords := []string{"등록", "추가", "만들", "생성", "create", "add", "new"}
+	taskKeywords := []string{"할일", "할 일", "todo", "task", "일정", "해야 할"}
+	createKeywords := []string{"추가해줘", "만들어줘", "생성해줘", "등록해줘", "create ", "add ", "새로운"}
 
 	isTask := containsAny(q, taskKeywords)
-	isList := containsAny(q, listKeywords)
 	isCreate := containsAny(q, createKeywords)
 
 	// Document-related
@@ -42,6 +40,10 @@ func DetectIntent(query string) *Intent {
 	agentKeywords := []string{"에이전트", "agent", "워크플로우", "workflow"}
 	isAgent := containsAny(q, agentKeywords)
 
+	// Question markers → always list, never create
+	questionMarkers := []string{"뭐", "있지", "있어", "알려", "보여", "어떤", "몇", "what", "show", "which", "?"}
+	isQuestion := containsAny(q, questionMarkers)
+
 	// Determine intent (order matters: specific first)
 	if isWS {
 		return &Intent{Action: "list_workspaces", Query: query}
@@ -49,16 +51,16 @@ func DetectIntent(query string) *Intent {
 	if isAgent {
 		return &Intent{Action: "list_agents", Query: query}
 	}
-	if isTask && isCreate {
+	if isTask && isCreate && !isQuestion {
 		return &Intent{Action: "create_task", Query: query}
 	}
-	if isTask && (isList || !isCreate) {
+	if isTask {
 		return &Intent{Action: "list_tasks", Query: query}
 	}
-	if isDoc && isCreate {
+	if isDoc && isCreate && !isQuestion {
 		return &Intent{Action: "create_document", Query: query}
 	}
-	if isDoc && (isList || !isCreate) {
+	if isDoc {
 		return &Intent{Action: "list_documents", Query: query}
 	}
 

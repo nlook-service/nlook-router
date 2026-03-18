@@ -211,9 +211,9 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]inte
 
 	// Workspaces
 	case "list_workspaces":
-		return c.get(ctx, "/api/v1/public/workspaces")
+		return c.get(ctx, "/api/v1/public/collections")
 	case "get_workspace":
-		return c.get(ctx, fmt.Sprintf("/api/v1/public/workspaces/%v", args["id"]))
+		return c.get(ctx, fmt.Sprintf("/api/v1/public/collections/%v", args["id"]))
 
 	// Workflows
 	case "list_workflows":
