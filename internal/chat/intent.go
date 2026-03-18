@@ -52,13 +52,14 @@ func DetectIntent(query string) *Intent {
 		return &Intent{Action: "list_agents", Query: query}
 	}
 	if isTask && isCreate && !isQuestion {
-		return &Intent{Action: "create_task", Query: query}
+		// Don't create directly — fetch workspaces and ask user to confirm
+		return &Intent{Action: "confirm_create_task", Query: query}
 	}
 	if isTask {
 		return &Intent{Action: "list_tasks", Query: query}
 	}
 	if isDoc && isCreate && !isQuestion {
-		return &Intent{Action: "create_document", Query: query}
+		return &Intent{Action: "confirm_create_document", Query: query}
 	}
 	if isDoc {
 		return &Intent{Action: "list_documents", Query: query}
@@ -88,17 +89,18 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client) s
 	case "list_documents":
 		log.Printf("intent: 📄 calling list_documents")
 		result, err = mcpClient.CallTool(ctx, "list_documents", map[string]interface{}{"limit": 20})
-	case "create_task":
-		log.Printf("intent: ✅ calling create_task: %s", intent.Query)
-		result, err = mcpClient.CallTool(ctx, "create_task", map[string]interface{}{
-			"title": extractTitle(intent.Query),
-		})
-	case "create_document":
-		log.Printf("intent: 📝 calling create_document: %s", intent.Query)
-		result, err = mcpClient.CallTool(ctx, "create_document", map[string]interface{}{
-			"title":   extractTitle(intent.Query),
-			"content": intent.Query,
-		})
+	case "confirm_create_task", "confirm_create_document":
+		log.Printf("intent: 📋 fetching workspaces for confirmation")
+		wsResult, wsErr := mcpClient.CallTool(ctx, "list_workspaces", map[string]interface{}{})
+		if wsErr != nil {
+			log.Printf("intent: ✗ workspace fetch failed: %v", wsErr)
+		}
+		wsData, _ := json.Marshal(wsResult)
+		itemType := "할일"
+		if intent.Action == "confirm_create_document" {
+			itemType = "문서"
+		}
+		return fmt.Sprintf("[사용자가 %s 생성을 요청함. 아래 workspace 목록을 보여주고, 어떤 workspace에 저장할지 물어보세요. 직접 생성하지 마세요.]\n\nWorkspace 목록:\n%s", itemType, truncateStr(string(wsData), 2000))
 	case "list_workspaces":
 		result, err = mcpClient.CallTool(ctx, "list_workspaces", map[string]interface{}{})
 	case "list_agents":
