@@ -16,6 +16,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/apiclient"
 	"github.com/nlook-service/nlook-router/internal/engine"
 	"github.com/nlook-service/nlook-router/internal/mcp"
+	"github.com/nlook-service/nlook-router/internal/ollama"
 )
 
 // WSMessage mirrors the WebSocket message format.
@@ -138,10 +139,32 @@ When suggesting actions, describe what you can do clearly.`
 func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*ChatResponsePayload, error) {
 	model := req.Model
 	if model == "" {
+		model = os.Getenv("NLOOK_AI_MODEL")
+	}
+
+	// Auto-detect: if no model specified, try Ollama first
+	if model == "" {
+		ollamaClient := ollama.NewClient()
+		if ollamaClient.IsRunning(ctx) {
+			models, _ := ollamaClient.List(ctx)
+			if len(models) > 0 {
+				model = models[0].Name
+				log.Printf("chat: using local model %s", model)
+			}
+		}
+	}
+
+	// Fallback to Claude
+	if model == "" {
 		model = "claude-sonnet-4-20250514"
 	}
 
-	// If MCP client available, use tool_use flow (non-streaming for tool calls)
+	// Local model → stream via Ollama
+	if isLocalModel(model) {
+		return h.processChatOllama(ctx, req, model)
+	}
+
+	// Claude with MCP tools
 	if h.mcpClient != nil && isClaudeModel(model) {
 		return h.processChatWithTools(ctx, req, model)
 	}
@@ -151,7 +174,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		return h.processChatStream(ctx, req, model)
 	}
 
-	// Non-Claude models: simple LLM call
+	// Other models: simple LLM call
 	return h.processChatSimple(ctx, req, model)
 }
 
@@ -249,6 +272,44 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 		ConversationID: req.ConversationID,
 		MessageID:      req.MessageID,
 		Content:        content,
+		Model:          model,
+		Role:           "assistant",
+	}, nil
+}
+
+// processChatOllama streams via local Ollama with chat:delta events.
+func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
+	ollamaClient := ollama.NewClient()
+
+	fullText, err := ollamaClient.ChatStream(ctx, model, defaultSystemPrompt, req.Query,
+		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 4096},
+		func(text string) {
+			h.sendResponse("chat:delta", ChatDeltaPayload{
+				ConversationID: req.ConversationID,
+				MessageID:      req.MessageID,
+				Delta:          text,
+				Done:           false,
+			})
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("ollama chat: %w", err)
+	}
+
+	// Send done signal
+	h.sendResponse("chat:delta", ChatDeltaPayload{
+		ConversationID: req.ConversationID,
+		MessageID:      req.MessageID,
+		Delta:          "",
+		Done:           true,
+		FullContent:    fullText,
+		Model:          model,
+	})
+
+	return &ChatResponsePayload{
+		ConversationID: req.ConversationID,
+		MessageID:      req.MessageID,
+		Content:        fullText,
 		Model:          model,
 		Role:           "assistant",
 	}, nil
@@ -491,6 +552,22 @@ func (h *Handler) sendResponse(msgType string, payload interface{}) {
 
 func isClaudeModel(model string) bool {
 	return strings.HasPrefix(model, "claude") || strings.HasPrefix(model, "anthropic")
+}
+
+var localModelPrefixes = []string{
+	"qwen", "llama", "mistral", "codellama", "gemma", "phi",
+	"deepseek", "starcoder", "vicuna", "orca", "wizardcoder",
+	"ollama/", "local/",
+}
+
+func isLocalModel(model string) bool {
+	lower := strings.ToLower(model)
+	for _, prefix := range localModelPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func truncate(s string, maxLen int) string {
