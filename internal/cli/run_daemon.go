@@ -24,7 +24,8 @@ import (
 	"github.com/nlook-service/nlook-router/internal/ws"
 )
 
-const version = "0.2.9"
+// Version is set by ldflags at build time, or defaults to dev.
+var Version = "0.2.15"
 
 // RunDaemon starts the local HTTP server, heartbeat loop, WebSocket client, and SSH proxy.
 func RunDaemon(cfg *config.Config) error {
@@ -39,7 +40,7 @@ func RunDaemon(cfg *config.Config) error {
 	client := apiclient.New(cfg.APIURL, cfg.APIKey)
 	payload := &apiclient.RegisterPayload{
 		RouterID: cfg.RouterID,
-		Version:  version,
+		Version:  Version,
 	}
 	if payload.RouterID == "" {
 		payload.RouterID = "local-1"
@@ -136,7 +137,7 @@ func RunDaemon(cfg *config.Config) error {
 			log.Fatalf("server: %v", err)
 		}
 	}()
-	log.Printf("router v%s listening on http://%s", version, addr)
+	log.Printf("router v%s listening on http://%s", Version, addr)
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh

@@ -49,7 +49,7 @@ func CheckForUpdate() {
 			return
 		}
 		latest := release.TagName
-		current := "v" + version
+		current := "v" + Version
 		if latest == current || latest <= current {
 			return
 		}
@@ -110,7 +110,7 @@ func CheckForUpdate() {
 }
 
 func runSelfUpdate() error {
-	fmt.Printf("🔍 Checking for updates (current: v%s)...\n", version)
+	fmt.Printf("🔍 Checking for updates (current: v%s)...\n", Version)
 
 	release, err := getLatestRelease()
 	if err != nil {
@@ -118,9 +118,9 @@ func runSelfUpdate() error {
 	}
 
 	latest := release.TagName
-	current := "v" + version
+	current := "v" + Version
 	if latest == current {
-		fmt.Printf("✅ Already up to date (v%s)\n", version)
+		fmt.Printf("✅ Already up to date (v%s)\n", Version)
 		return nil
 	}
 

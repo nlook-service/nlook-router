@@ -4,7 +4,7 @@ name: Release Router
 on:
   push:
     tags:
-      - 'router-v*'
+      - 'v*'
 
 permissions:
   contents: write
