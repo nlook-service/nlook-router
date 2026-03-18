@@ -291,13 +291,16 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 
 	// Intent detection: directly call MCP tools without relying on model
 	if h.mcpClient != nil {
-		// 1. Fetch referenced document/task content
+		// 1. Fetch referenced document/task content (highest priority)
 		refContent := ExtractDocumentRefs(ctx, req.Query, h.mcpClient)
-		if refContent != "" {
+		hasRefs := refContent != ""
+		if hasRefs {
+			log.Printf("chat: ├ found document/task references, fetching content")
 			req.Query = req.Query + refContent + "\n\nAbove is the referenced content. Analyze and respond based on this data."
 		}
 
-		// 2. Auto-detect intent and call MCP tools
+		// 2. Auto-detect intent — skip if document refs already fetched
+		if !hasRefs {
 		if intent := DetectIntent(req.Query); intent != nil {
 			// Send immediate feedback: "데이터 조회 중..."
 			h.sendResponse("chat:delta", ChatDeltaPayload{
@@ -312,6 +315,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 				req.Query = fmt.Sprintf("%s\n\n[Tool Result: %s]\n%s\n[End Tool Result]\n\nAbove is the data. Present it clearly and concisely to the user.", req.Query, intent.Action, toolResult)
 			}
 		}
+		} // end !hasRefs
 	}
 
 	// 1. vLLM (우선) — 고성능 배치 처리
