@@ -40,7 +40,7 @@ var aiRemoveCmd = &cobra.Command{
 }
 
 func init() {
-	aiSetupCmd.Flags().StringVar(&modelFlag, "model", "qwen2.5:7b", "model to download")
+	aiSetupCmd.Flags().StringVar(&modelFlag, "model", "qwen3:8b", "model to download")
 	aiCmd.AddCommand(aiSetupCmd, aiListCmd, aiRemoveCmd)
 	rootCmd.AddCommand(aiCmd)
 }

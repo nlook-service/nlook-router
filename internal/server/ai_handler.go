@@ -36,7 +36,7 @@ func (s *Server) aiSearchHandler(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = os.Getenv("NLOOK_AI_MODEL")
 		if model == "" {
-			model = "qwen2.5:7b"
+			model = "qwen3:8b"
 		}
 	}
 
