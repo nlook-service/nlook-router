@@ -196,12 +196,60 @@ func detectLang(text string) string {
 	return "en"
 }
 
+const recentMessageCount = 6 // Keep last N messages as full context
+
 func (h *Handler) getOllamaHistory(req *ChatRequestPayload) []ollama.MessageEntry {
-	entries := make([]ollama.MessageEntry, 0, len(req.History))
-	for _, m := range req.History {
+	history := req.History
+	if len(history) <= recentMessageCount {
+		// Short conversation — return all messages as-is
+		entries := make([]ollama.MessageEntry, 0, len(history))
+		for _, m := range history {
+			entries = append(entries, ollama.MessageEntry{Role: m.Role, Content: m.Content})
+		}
+		return entries
+	}
+
+	// Sliding window: summarize older messages + keep recent ones
+	olderMessages := history[:len(history)-recentMessageCount]
+	recentMessages := history[len(history)-recentMessageCount:]
+
+	entries := make([]ollama.MessageEntry, 0, recentMessageCount+1)
+
+	// Compress older messages into a summary
+	summary := compressHistory(olderMessages)
+	entries = append(entries, ollama.MessageEntry{
+		Role:    "system",
+		Content: summary,
+	})
+
+	// Add recent messages as-is
+	for _, m := range recentMessages {
 		entries = append(entries, ollama.MessageEntry{Role: m.Role, Content: m.Content})
 	}
 	return entries
+}
+
+// compressHistory creates a condensed summary of older conversation messages.
+func compressHistory(messages []HistoryMessage) string {
+	var sb strings.Builder
+	sb.WriteString("[이전 대화 요약]\n")
+
+	for _, m := range messages {
+		role := "사용자"
+		if m.Role == "assistant" {
+			role = "AI"
+		}
+		content := m.Content
+		// Truncate long messages
+		if len(content) > 150 {
+			content = content[:150] + "..."
+		}
+		// Remove newlines for compactness
+		content = strings.ReplaceAll(content, "\n", " ")
+		sb.WriteString("- " + role + ": " + content + "\n")
+	}
+	sb.WriteString("[이전 대화 끝]")
+	return sb.String()
 }
 
 func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*ChatResponsePayload, error) {
