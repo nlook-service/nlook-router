@@ -293,11 +293,17 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 
 	// Intent detection: directly call MCP tools without relying on model
 	if h.mcpClient != nil {
+		// 1. Fetch referenced document/task content
+		refContent := ExtractDocumentRefs(ctx, req.Query, h.mcpClient)
+		if refContent != "" {
+			req.Query = req.Query + refContent + "\n\nAbove is the referenced content. Analyze and respond based on this data."
+		}
+
+		// 2. Auto-detect intent and call MCP tools
 		if intent := DetectIntent(req.Query); intent != nil {
 			toolResult := ExecuteIntent(ctx, intent, h.mcpClient)
 			if toolResult != "" {
-				// Inject tool result into query and let model format the response
-				req.Query = fmt.Sprintf("%s\n\n[Tool Result: %s]\n%s\n[End Tool Result]\n\nAbove is the data from the system. Please summarize and present it to the user in a helpful way.", req.Query, intent.Action, toolResult)
+				req.Query = fmt.Sprintf("%s\n\n[Tool Result: %s]\n%s\n[End Tool Result]\n\nAbove is the data from the system. Summarize and present it to the user.", req.Query, intent.Action, toolResult)
 			}
 		}
 	}

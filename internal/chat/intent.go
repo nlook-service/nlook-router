@@ -99,6 +99,130 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client) s
 	return string(data)
 }
 
+// ExtractDocumentRefs finds [@document:ID:title] patterns and fetches full content via MCP.
+func ExtractDocumentRefs(ctx context.Context, query string, mcpClient *mcp.Client) string {
+	if mcpClient == nil {
+		return ""
+	}
+
+	// Match [@document:123:title] or [@task:456:title]
+	patterns := []struct {
+		prefix string
+		tool   string
+		idKey  string
+	}{
+		{"@document:", "get_document", "id"},
+		{"@task:", "get_task", "id"},
+	}
+
+	var sb strings.Builder
+	found := false
+
+	for _, p := range patterns {
+		idx := 0
+		for {
+			start := strings.Index(query[idx:], "["+p.prefix)
+			if start == -1 {
+				break
+			}
+			start += idx
+			end := strings.Index(query[start:], "]")
+			if end == -1 {
+				break
+			}
+			end += start
+
+			// Parse: [@document:123:title]
+			inner := query[start+2+len(p.prefix)-1 : end] // "123:title"
+			parts := strings.SplitN(inner, ":", 2)
+			if len(parts) < 1 {
+				idx = end + 1
+				continue
+			}
+
+			// Extract ID
+			var id float64
+			for _, c := range parts[0] {
+				if c >= '0' && c <= '9' {
+					id = id*10 + float64(c-'0')
+				}
+			}
+
+			if id > 0 {
+				result, err := mcpClient.CallTool(ctx, p.tool, map[string]interface{}{"id": id})
+				if err == nil {
+					data, _ := json.MarshalIndent(result, "", "  ")
+					if !found {
+						sb.WriteString("\n\n[Referenced Content]\n")
+						found = true
+					}
+					title := ""
+					if len(parts) > 1 {
+						title = parts[1]
+					}
+					sb.WriteString(fmt.Sprintf("\n## %s\n%s\n", title, string(data)))
+					log.Printf("intent: fetched %s id=%.0f", p.tool, id)
+				}
+			}
+			idx = end + 1
+		}
+	}
+
+	// Also check old format: [문서: title (ID:123)]
+	oldPatterns := []struct {
+		label string
+		tool  string
+	}{
+		{"문서", "get_document"},
+		{"할일", "get_task"},
+	}
+	for _, op := range oldPatterns {
+		search := "[" + op.label + ":"
+		idx := 0
+		for {
+			start := strings.Index(query[idx:], search)
+			if start == -1 {
+				break
+			}
+			start += idx
+			end := strings.Index(query[start:], "]")
+			if end == -1 {
+				break
+			}
+			end += start
+
+			// Find (ID:123)
+			idStart := strings.Index(query[start:end], "(ID:")
+			if idStart != -1 {
+				idStr := query[start+idStart+4 : end-1]
+				var id float64
+				for _, c := range idStr {
+					if c >= '0' && c <= '9' {
+						id = id*10 + float64(c-'0')
+					}
+				}
+				if id > 0 {
+					result, err := mcpClient.CallTool(ctx, op.tool, map[string]interface{}{"id": id})
+					if err == nil {
+						data, _ := json.MarshalIndent(result, "", "  ")
+						if !found {
+							sb.WriteString("\n\n[Referenced Content]\n")
+							found = true
+						}
+						sb.WriteString(fmt.Sprintf("\n%s\n", string(data)))
+					}
+				}
+			}
+			idx = end + 1
+		}
+	}
+
+	if found {
+		sb.WriteString("[End Referenced Content]\n")
+	}
+	return sb.String()
+}
+
 func containsAny(text string, keywords []string) bool {
 	for _, kw := range keywords {
 		if strings.Contains(text, kw) {
