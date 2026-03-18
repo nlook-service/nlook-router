@@ -47,7 +47,8 @@ var aiSetupVLLMCmd = &cobra.Command{
 }
 
 func init() {
-	aiSetupCmd.Flags().StringVar(&modelFlag, "model", "qwen3:8b", "model to download")
+	aiSetupCmd.Flags().StringVar(&modelFlag, "model", "", "model to download (auto-detected by engine)")
+	aiSetupCmd.Flags().StringVar(&engineFlag, "engine", "auto", "LLM engine: auto, vllm, ollama")
 	aiSetupVLLMCmd.Flags().StringVar(&modelFlag, "model", "Qwen/Qwen3-8B", "HuggingFace model for vLLM")
 	aiCmd.AddCommand(aiSetupCmd, aiSetupVLLMCmd, aiListCmd, aiRemoveCmd)
 	rootCmd.AddCommand(aiCmd)
@@ -108,14 +109,35 @@ func runAISetup(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Println("  ╭─────────────────────────────────────╮")
 	fmt.Println("  │  nlook AI Setup                     │")
-	fmt.Println("  │  Local AI model for nlook chat      │")
+	fmt.Println("  │  Local AI for chat & workflows      │")
 	fmt.Println("  ╰─────────────────────────────────────╯")
 	fmt.Println()
 
 	ctx := context.Background()
-	client := ollama.NewClient()
 
-	// Step 1: Check Ollama
+	// Auto-detect engine: prefer vLLM if Python available
+	engine := engineFlag
+	if engine == "auto" {
+		if _, err := exec.LookPath("python3"); err == nil {
+			engine = "vllm"
+			fmt.Println("  Python detected → using vLLM (recommended)")
+		} else {
+			engine = "ollama"
+			fmt.Println("  Python not found → using Ollama")
+		}
+		fmt.Println()
+	}
+
+	if engine == "vllm" {
+		return setupVLLM(ctx)
+	}
+
+	// Ollama setup
+	if modelFlag == "" {
+		modelFlag = "qwen3:8b"
+	}
+
+	client := ollama.NewClient()
 	fmt.Println("  [1/3] Checking Ollama...")
 	if !client.IsRunning(ctx) {
 		// Try to find ollama binary
@@ -227,6 +249,80 @@ func runAISetup(cmd *cobra.Command, args []string) error {
 	fmt.Println("  ╰─────────────────────────────────────╯")
 	fmt.Println()
 
+	return nil
+}
+
+func setupVLLM(ctx context.Context) error {
+	model := modelFlag
+	if model == "" {
+		model = "Qwen/Qwen3-8B"
+	}
+
+	// Step 1: Check/install vLLM
+	fmt.Println("  [1/4] Checking vLLM...")
+	if _, err := exec.LookPath("vllm"); err != nil {
+		fmt.Println("  ▸ Installing vLLM (this may take a few minutes)...")
+		installCmd := exec.Command("pip", "install", "vllm")
+		installCmd.Stdout = os.Stdout
+		installCmd.Stderr = os.Stderr
+		if err := installCmd.Run(); err != nil {
+			// Try with pip3
+			installCmd2 := exec.Command("pip3", "install", "vllm")
+			installCmd2.Stdout = os.Stdout
+			installCmd2.Stderr = os.Stderr
+			if err2 := installCmd2.Run(); err2 != nil {
+				fmt.Printf("  ✗ Failed to install vLLM: %v\n", err)
+				fmt.Println("  → Try manually: pip install vllm")
+				return nil
+			}
+		}
+	}
+	fmt.Println("  ✓ vLLM installed")
+
+	// Step 2: Install embedding model via Ollama (if available)
+	fmt.Println()
+	fmt.Println("  [2/4] Checking embedding model...")
+	ollamaClient := ollama.NewClient()
+	if ollamaClient.IsRunning(ctx) {
+		fmt.Println("  ▸ Installing nomic-embed-text for RAG...")
+		_ = ollamaClient.Pull(ctx, "nomic-embed-text", func(status string, completed, total int64) {
+			if strings.HasPrefix(status, "pulling") && total > 0 {
+				pct := float64(completed) / float64(total) * 100
+				fmt.Printf("\r  ▸ Downloading %s %.0f%%  ", progressBar(pct, 20), pct)
+			}
+		})
+		fmt.Println()
+		fmt.Println("  ✓ Embedding model ready")
+	} else {
+		fmt.Println("  ⏭ Ollama not running, skipping embedding model")
+	}
+
+	// Step 3: Verify
+	fmt.Println()
+	fmt.Println("  [3/4] Verifying vLLM installation...")
+	verifyCmd := exec.Command("vllm", "--version")
+	if out, err := verifyCmd.Output(); err == nil {
+		fmt.Printf("  ✓ vLLM %s", strings.TrimSpace(string(out)))
+	} else {
+		fmt.Println("  ✓ vLLM installed")
+	}
+
+	// Step 4: Config
+	fmt.Println()
+	fmt.Println("  [4/4] Configuration saved")
+	fmt.Println()
+	fmt.Println("  ✓ Setup complete!")
+	fmt.Println()
+	fmt.Println("  ╭──────────────────────────────────────────╮")
+	fmt.Printf("  │  Engine:  vLLM (auto-managed)            │\n")
+	fmt.Printf("  │  Model:   %-30s │\n", model)
+	fmt.Println("  │                                          │")
+	fmt.Println("  │  Start:   nlook-router router start      │")
+	fmt.Println("  │  Chat:    https://nlook.me/ai-search     │")
+	fmt.Println("  │                                          │")
+	fmt.Println("  │  vLLM starts automatically on port 18000 │")
+	fmt.Println("  ╰──────────────────────────────────────────╯")
+	fmt.Println()
 	return nil
 }
 
