@@ -32,6 +32,7 @@ type ChatRequestPayload struct {
 	Query          string `json:"query"`
 	UserID         int64  `json:"user_id"`
 	Model          string `json:"model,omitempty"`
+	Lang           string `json:"lang,omitempty"`
 }
 
 // ChatResponsePayload is sent back to cloud with the AI response.
@@ -119,9 +120,7 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 	}()
 }
 
-const defaultSystemPrompt = `You are nlook AI assistant. You help users manage documents, tasks, and provide analysis.
-
-IMPORTANT: Always respond in the SAME language the user writes in. If the user writes in Korean, respond entirely in Korean. If in English, respond in English. Never mix languages.
+const baseSystemPrompt = `You are nlook AI assistant. You help users manage documents, tasks, and provide analysis.
 
 When the user wants to:
 - Create a document/note → use the create_document tool
@@ -136,6 +135,17 @@ Intent classification:
 3. If general question → answer directly without tools
 
 Always confirm before creating/modifying content. Respond concisely.`
+
+func getSystemPrompt(lang string) string {
+	switch lang {
+	case "ko":
+		return baseSystemPrompt + "\n\nIMPORTANT: You MUST respond entirely in Korean (한국어). 절대 다른 언어를 섞지 마세요."
+	case "en":
+		return baseSystemPrompt + "\n\nIMPORTANT: You MUST respond entirely in English."
+	default:
+		return baseSystemPrompt + "\n\nIMPORTANT: Always respond in the SAME language the user writes in. Never mix languages."
+	}
+}
 
 func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*ChatResponsePayload, error) {
 	model := req.Model
@@ -201,7 +211,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 	}
 
 	// First LLM call
-	respBody, err := h.callAnthropic(ctx, apiKey, model, defaultSystemPrompt, messages, anthropicTools)
+	respBody, err := h.callAnthropic(ctx, apiKey, model, getSystemPrompt(req.Lang), messages, anthropicTools)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +265,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 		)
 
 		// Second call without tools (get final text response)
-		finalResp, err := h.callAnthropic(ctx, apiKey, model, defaultSystemPrompt, messages, nil)
+		finalResp, err := h.callAnthropic(ctx, apiKey, model, getSystemPrompt(req.Lang), messages, nil)
 		if err != nil {
 			return nil, fmt.Errorf("follow-up LLM call: %w", err)
 		}
@@ -282,7 +292,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	ollamaClient := ollama.NewClient()
 
-	fullText, err := ollamaClient.ChatStream(ctx, model, defaultSystemPrompt, req.Query,
+	fullText, err := ollamaClient.ChatStream(ctx, model, getSystemPrompt(req.Lang), req.Query,
 		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 4096},
 		func(text string) {
 			h.sendResponse("chat:delta", ChatDeltaPayload{
@@ -320,7 +330,7 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 func (h *Handler) processChatSimple(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	output, _, err := h.skillRunner.RunSkill(ctx,
 		&apiclient.WorkflowSkill{Name: "chat", SkillType: "prompt", Content: req.Query},
-		&apiclient.WorkflowAgent{Model: model, SystemPrompt: defaultSystemPrompt, MaxTokens: 4096, Temperature: 0.7},
+		&apiclient.WorkflowAgent{Model: model, SystemPrompt: getSystemPrompt(req.Lang), MaxTokens: 4096, Temperature: 0.7},
 		nil,
 	)
 	if err != nil {
@@ -352,7 +362,7 @@ func (h *Handler) processChatStream(ctx context.Context, req *ChatRequestPayload
 	reqBody := anthropicRequest{
 		Model:       model,
 		MaxTokens:   4096,
-		System:      defaultSystemPrompt,
+		System:      getSystemPrompt(req.Lang),
 		Messages:    []map[string]interface{}{{"role": "user", "content": req.Query}},
 		Temperature: 0.7,
 		Stream:      true,
