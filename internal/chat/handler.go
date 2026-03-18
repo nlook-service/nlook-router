@@ -291,6 +291,17 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		model = "claude-sonnet-4-20250514"
 	}
 
+	// Intent detection: directly call MCP tools without relying on model
+	if h.mcpClient != nil {
+		if intent := DetectIntent(req.Query); intent != nil {
+			toolResult := ExecuteIntent(ctx, intent, h.mcpClient)
+			if toolResult != "" {
+				// Inject tool result into query and let model format the response
+				req.Query = fmt.Sprintf("%s\n\n[Tool Result: %s]\n%s\n[End Tool Result]\n\nAbove is the data from the system. Please summarize and present it to the user in a helpful way.", req.Query, intent.Action, toolResult)
+			}
+		}
+	}
+
 	// Local model → stream via Ollama
 	if isLocalModel(model) {
 		return h.processChatOllama(ctx, req, model)
