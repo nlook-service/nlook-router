@@ -121,6 +121,8 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 
 const defaultSystemPrompt = `You are nlook AI assistant. You help users manage documents, tasks, and provide analysis.
 
+IMPORTANT: Always respond in the SAME language the user writes in. If the user writes in Korean, respond entirely in Korean. If in English, respond in English. Never mix languages.
+
 When the user wants to:
 - Create a document/note → use the create_document tool
 - Create a task/todo → use the create_task tool
@@ -133,8 +135,7 @@ Intent classification:
 2. If asking about existing content → search and show results
 3. If general question → answer directly without tools
 
-Always confirm before creating/modifying content. Respond concisely in the user's language.
-When suggesting actions, describe what you can do clearly.`
+Always confirm before creating/modifying content. Respond concisely.`
 
 func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*ChatResponsePayload, error) {
 	model := req.Model
