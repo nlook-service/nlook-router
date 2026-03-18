@@ -305,16 +305,37 @@ func (c *Client) ChatStream(ctx context.Context, model, system, prompt string, o
 	}
 	messages = append(messages, map[string]string{"role": "user", "content": prompt})
 
+	// Apply model-specific optimal defaults from unsloth config
+	defaults := GetModelDefaults(model)
+	temp := defaults.Temperature
+	if opts.Temperature > 0 {
+		temp = opts.Temperature
+	}
+	numPredict := defaults.NumPredict
+	if opts.MaxTokens > 0 {
+		numPredict = opts.MaxTokens
+	}
+
+	options := map[string]interface{}{
+		"temperature":      temp,
+		"top_p":            defaults.TopP,
+		"num_predict":      numPredict,
+	}
+	if defaults.TopK > 0 {
+		options["top_k"] = defaults.TopK
+	}
+	if defaults.RepetitionPenalty > 1.0 {
+		options["repeat_penalty"] = defaults.RepetitionPenalty
+	}
+	if defaults.PresencePenalty > 0 {
+		options["presence_penalty"] = defaults.PresencePenalty
+	}
+
 	reqBody := map[string]interface{}{
 		"model":    model,
 		"messages": messages,
 		"stream":   true,
-	}
-	if opts.Temperature > 0 {
-		reqBody["options"] = map[string]interface{}{
-			"temperature": opts.Temperature,
-			"num_predict": opts.MaxTokens,
-		}
+		"options":  options,
 	}
 
 	body, _ := json.Marshal(reqBody)
