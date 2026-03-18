@@ -138,6 +138,151 @@ func (c *Client) Remove(ctx context.Context, model string) error {
 	return nil
 }
 
+// ToolCall represents a tool call from the model.
+type ToolCall struct {
+	Function struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	} `json:"function"`
+}
+
+// ChatResponse holds the result of a non-streaming chat.
+type ChatResponse struct {
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Done      bool       `json:"done"`
+}
+
+// ChatWithTools sends a chat with tool definitions (non-streaming) and returns tool calls if any.
+func (c *Client) ChatWithTools(ctx context.Context, model, system, prompt string, tools []map[string]interface{}) (*ChatResponse, error) {
+	messages := []map[string]interface{}{}
+	if system != "" {
+		messages = append(messages, map[string]interface{}{"role": "system", "content": system})
+	}
+	messages = append(messages, map[string]interface{}{"role": "user", "content": prompt})
+
+	reqBody := map[string]interface{}{
+		"model":    model,
+		"messages": messages,
+		"stream":   false,
+		"tools":    tools,
+	}
+
+	body, _ := json.Marshal(reqBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("chat request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("chat failed: status=%d body=%s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Message struct {
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls"`
+		} `json:"message"`
+		Done bool `json:"done"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+
+	return &ChatResponse{
+		Content:   result.Message.Content,
+		ToolCalls: result.Message.ToolCalls,
+		Done:      result.Done,
+	}, nil
+}
+
+// ChatWithToolResults sends tool results back to the model for final response (streaming).
+func (c *Client) ChatWithToolResults(ctx context.Context, model, system, prompt string, toolCalls []ToolCall, toolResults []map[string]interface{}, onDelta func(string)) (string, error) {
+	messages := []map[string]interface{}{}
+	if system != "" {
+		messages = append(messages, map[string]interface{}{"role": "system", "content": system})
+	}
+	messages = append(messages, map[string]interface{}{"role": "user", "content": prompt})
+
+	// Add assistant message with tool calls
+	assistantMsg := map[string]interface{}{"role": "assistant", "content": ""}
+	if len(toolCalls) > 0 {
+		calls := make([]map[string]interface{}, len(toolCalls))
+		for i, tc := range toolCalls {
+			calls[i] = map[string]interface{}{
+				"function": map[string]interface{}{
+					"name":      tc.Function.Name,
+					"arguments": tc.Function.Arguments,
+				},
+			}
+		}
+		assistantMsg["tool_calls"] = calls
+	}
+	messages = append(messages, assistantMsg)
+
+	// Add tool results
+	for _, tr := range toolResults {
+		messages = append(messages, map[string]interface{}{
+			"role":    "tool",
+			"content": tr["content"],
+		})
+	}
+
+	reqBody := map[string]interface{}{
+		"model":    model,
+		"messages": messages,
+		"stream":   true,
+	}
+
+	body, _ := json.Marshal(reqBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewBuffer(body))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("chat request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var fullText string
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 64*1024)
+	for scanner.Scan() {
+		var event struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Done bool `json:"done"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			continue
+		}
+		if event.Message.Content != "" {
+			fullText += event.Message.Content
+			if onDelta != nil {
+				onDelta(event.Message.Content)
+			}
+		}
+		if event.Done {
+			break
+		}
+	}
+	return fullText, scanner.Err()
+}
+
 // ChatStream sends a chat message and streams the response token by token.
 // Returns the full response text.
 func (c *Client) ChatStream(ctx context.Context, model, system, prompt string, opts ChatOptions, onDelta func(text string)) (string, error) {

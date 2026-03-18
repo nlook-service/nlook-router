@@ -311,11 +311,82 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 	}, nil
 }
 
-// processChatOllama streams via local Ollama with chat:delta events.
+// processChatOllama uses local Ollama with tool calling + streaming.
 func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	ollamaClient := ollama.NewClient()
+	systemPrompt := getSystemPrompt(req.Lang, req.Query)
 
-	fullText, err := ollamaClient.ChatStream(ctx, model, getSystemPrompt(req.Lang, req.Query), req.Query,
+	// If MCP client available, try tool calling first (non-streaming)
+	if h.mcpClient != nil {
+		tools := mcp.GetChatTools()
+		ollamaTools := make([]map[string]interface{}, len(tools))
+		for i, t := range tools {
+			ollamaTools[i] = map[string]interface{}{
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":        t.Name,
+					"description": t.Description,
+					"parameters":  t.InputSchema,
+				},
+			}
+		}
+
+		resp, err := ollamaClient.ChatWithTools(ctx, model, systemPrompt, req.Query, ollamaTools)
+		if err == nil && len(resp.ToolCalls) > 0 {
+			// Execute tool calls
+			toolResults := make([]map[string]interface{}, 0)
+			for _, tc := range resp.ToolCalls {
+				log.Printf("chat: ollama tool_call name=%s", tc.Function.Name)
+				result, toolErr := h.mcpClient.CallTool(ctx, tc.Function.Name, tc.Function.Arguments)
+				content := ""
+				if toolErr != nil {
+					content = fmt.Sprintf("Error: %v", toolErr)
+				} else {
+					resultBytes, _ := json.Marshal(result)
+					content = string(resultBytes)
+				}
+				toolResults = append(toolResults, map[string]interface{}{"content": content})
+			}
+
+			// Send tool results back to model for final streaming response
+			fullText, err := ollamaClient.ChatWithToolResults(ctx, model, systemPrompt, req.Query, resp.ToolCalls, toolResults,
+				func(text string) {
+					h.sendResponse("chat:delta", ChatDeltaPayload{
+						ConversationID: req.ConversationID,
+						MessageID:      req.MessageID,
+						Delta:          text,
+						Done:           false,
+					})
+				},
+			)
+			if err == nil {
+				h.sendResponse("chat:delta", ChatDeltaPayload{
+					ConversationID: req.ConversationID, MessageID: req.MessageID,
+					Delta: "", Done: true, FullContent: fullText, Model: model,
+				})
+				return &ChatResponsePayload{
+					ConversationID: req.ConversationID, MessageID: req.MessageID,
+					Content: fullText, Model: model, Role: "assistant",
+				}, nil
+			}
+			log.Printf("chat: tool result follow-up failed: %v, falling back", err)
+		}
+
+		// If tool calling returned text without tools, use it
+		if err == nil && resp.Content != "" {
+			h.sendResponse("chat:response", ChatResponsePayload{
+				ConversationID: req.ConversationID, MessageID: req.MessageID,
+				Content: resp.Content, Model: model, Role: "assistant",
+			})
+			return &ChatResponsePayload{
+				ConversationID: req.ConversationID, MessageID: req.MessageID,
+				Content: resp.Content, Model: model, Role: "assistant",
+			}, nil
+		}
+	}
+
+	// Fallback: simple streaming chat without tools
+	fullText, err := ollamaClient.ChatStream(ctx, model, systemPrompt, req.Query,
 		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 4096},
 		func(text string) {
 			h.sendResponse("chat:delta", ChatDeltaPayload{
@@ -330,22 +401,14 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 		return nil, fmt.Errorf("ollama chat: %w", err)
 	}
 
-	// Send done signal
 	h.sendResponse("chat:delta", ChatDeltaPayload{
-		ConversationID: req.ConversationID,
-		MessageID:      req.MessageID,
-		Delta:          "",
-		Done:           true,
-		FullContent:    fullText,
-		Model:          model,
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Delta: "", Done: true, FullContent: fullText, Model: model,
 	})
 
 	return &ChatResponsePayload{
-		ConversationID: req.ConversationID,
-		MessageID:      req.MessageID,
-		Content:        fullText,
-		Model:          model,
-		Role:           "assistant",
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Content: fullText, Model: model, Role: "assistant",
 	}, nil
 }
 
