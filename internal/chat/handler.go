@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -39,6 +40,16 @@ type ChatResponsePayload struct {
 	Content        string `json:"content"`
 	Model          string `json:"model"`
 	Role           string `json:"role"`
+}
+
+// ChatDeltaPayload is sent for streaming token-by-token responses.
+type ChatDeltaPayload struct {
+	ConversationID int64  `json:"conversation_id"`
+	MessageID      int64  `json:"message_id"`
+	Delta          string `json:"delta"`
+	Done           bool   `json:"done"`
+	FullContent    string `json:"full_content,omitempty"`
+	Model          string `json:"model,omitempty"`
 }
 
 // ChatErrorPayload is sent when chat processing fails.
@@ -130,12 +141,17 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		model = "claude-sonnet-4-20250514"
 	}
 
-	// If MCP client available, use tool_use flow
+	// If MCP client available, use tool_use flow (non-streaming for tool calls)
 	if h.mcpClient != nil && isClaudeModel(model) {
 		return h.processChatWithTools(ctx, req, model)
 	}
 
-	// Fallback: simple LLM call via skill_runner
+	// Claude without MCP: use streaming
+	if isClaudeModel(model) {
+		return h.processChatStream(ctx, req, model)
+	}
+
+	// Non-Claude models: simple LLM call
 	return h.processChatSimple(ctx, req, model)
 }
 
@@ -238,7 +254,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 	}, nil
 }
 
-// processChatSimple uses skill_runner for non-Claude models.
+// processChatSimple uses skill_runner for non-Claude models (no streaming).
 func (h *Handler) processChatSimple(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	output, _, err := h.skillRunner.RunSkill(ctx,
 		&apiclient.WorkflowSkill{Name: "chat", SkillType: "prompt", Content: req.Query},
@@ -264,6 +280,129 @@ func (h *Handler) processChatSimple(ctx context.Context, req *ChatRequestPayload
 	}, nil
 }
 
+// processChatStream sends streaming deltas via WebSocket, returns final response.
+func (h *Handler) processChatStream(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		return h.processChatSimple(ctx, req, model)
+	}
+
+	reqBody := anthropicRequest{
+		Model:       model,
+		MaxTokens:   4096,
+		System:      defaultSystemPrompt,
+		Messages:    []map[string]interface{}{{"role": "user", "content": req.Query}},
+		Temperature: 0.7,
+		Stream:      true,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.anthropic.com/v1/messages", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("API call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API error: status=%d body=%s", resp.StatusCode, truncate(string(respBody), 500))
+	}
+
+	// Check if response is actually streaming (SSE)
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "text/event-stream") {
+		// Non-streaming response, parse normally
+		respBody, _ := io.ReadAll(resp.Body)
+		var result anthropicResponse
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, fmt.Errorf("unmarshal response: %w", err)
+		}
+		text := ""
+		for _, block := range result.Content {
+			if block.Type == "text" {
+				text += block.Text
+			}
+		}
+		return &ChatResponsePayload{
+			ConversationID: req.ConversationID,
+			MessageID:      req.MessageID,
+			Content:        text,
+			Model:          model,
+			Role:           "assistant",
+		}, nil
+	}
+
+	// Parse SSE stream
+	var fullContent strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 64*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var event struct {
+			Type  string `json:"type"`
+			Delta struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+
+		if event.Type == "content_block_delta" && event.Delta.Type == "text_delta" && event.Delta.Text != "" {
+			fullContent.WriteString(event.Delta.Text)
+			h.sendResponse("chat:delta", ChatDeltaPayload{
+				ConversationID: req.ConversationID,
+				MessageID:      req.MessageID,
+				Delta:          event.Delta.Text,
+				Done:           false,
+			})
+		}
+	}
+
+	// Send final done signal
+	finalContent := fullContent.String()
+	h.sendResponse("chat:delta", ChatDeltaPayload{
+		ConversationID: req.ConversationID,
+		MessageID:      req.MessageID,
+		Delta:          "",
+		Done:           true,
+		FullContent:    finalContent,
+		Model:          model,
+	})
+
+	return &ChatResponsePayload{
+		ConversationID: req.ConversationID,
+		MessageID:      req.MessageID,
+		Content:        finalContent,
+		Model:          model,
+		Role:           "assistant",
+	}, nil
+}
+
 // Anthropic API types
 
 type anthropicRequest struct {
@@ -273,6 +412,7 @@ type anthropicRequest struct {
 	Messages    []map[string]interface{} `json:"messages"`
 	Tools       []map[string]interface{} `json:"tools,omitempty"`
 	Temperature float64                  `json:"temperature,omitempty"`
+	Stream      bool                     `json:"stream,omitempty"`
 }
 
 type anthropicContentBlock struct {
