@@ -77,11 +77,26 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client) s
 	var result interface{}
 	var err error
 
+	log.Printf("intent: ▶ action=%s query=%s", intent.Action, truncateStr(intent.Query, 80))
+
 	switch intent.Action {
 	case "list_tasks":
+		log.Printf("intent: 📋 calling list_tasks")
 		result, err = mcpClient.CallTool(ctx, "list_tasks", map[string]interface{}{"limit": 20})
 	case "list_documents":
+		log.Printf("intent: 📄 calling list_documents")
 		result, err = mcpClient.CallTool(ctx, "list_documents", map[string]interface{}{"limit": 20})
+	case "create_task":
+		log.Printf("intent: ✅ calling create_task: %s", intent.Query)
+		result, err = mcpClient.CallTool(ctx, "create_task", map[string]interface{}{
+			"title": extractTitle(intent.Query),
+		})
+	case "create_document":
+		log.Printf("intent: 📝 calling create_document: %s", intent.Query)
+		result, err = mcpClient.CallTool(ctx, "create_document", map[string]interface{}{
+			"title":   extractTitle(intent.Query),
+			"content": intent.Query,
+		})
 	case "list_workspaces":
 		result, err = mcpClient.CallTool(ctx, "list_workspaces", map[string]interface{}{})
 	case "list_agents":
@@ -91,12 +106,47 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client) s
 	}
 
 	if err != nil {
-		log.Printf("intent: MCP call failed: %v", err)
+		log.Printf("intent: ✗ MCP call failed: %v", err)
 		return fmt.Sprintf("[도구 호출 오류: %v]", err)
 	}
 
 	data, _ := json.MarshalIndent(result, "", "  ")
+	log.Printf("intent: ✓ result size=%d bytes", len(data))
 	return string(data)
+}
+
+// extractTitle tries to extract a meaningful title from the query.
+func extractTitle(query string) string {
+	// Remove common prefixes
+	prefixes := []string{
+		"등록해줘", "등록", "추가해줘", "추가", "만들어줘", "만들어", "생성",
+		"create", "add", "register",
+	}
+	title := query
+	for _, p := range prefixes {
+		title = strings.TrimSuffix(strings.TrimSpace(title), p)
+		title = strings.TrimPrefix(strings.TrimSpace(title), p)
+	}
+	title = strings.TrimSpace(title)
+
+	// Limit length
+	if len(title) > 100 {
+		title = title[:100]
+	}
+	if title == "" {
+		title = query
+		if len(title) > 50 {
+			title = title[:50]
+		}
+	}
+	return title
+}
+
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // ExtractDocumentRefs finds [@document:ID:title] patterns and fetches full content via MCP.

@@ -145,13 +145,17 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 		return
 	}
 
-	log.Printf("chat: received request conv=%d msg=%d query_len=%d", req.ConversationID, req.MessageID, len(req.Query))
+	log.Printf("chat: ═══════════════════════════════════════")
+	log.Printf("chat: ▶ request conv=%d msg=%d query=%s", req.ConversationID, req.MessageID, truncateLog(req.Query, 80))
+	log.Printf("chat: ▶ history=%d messages, lang=%s", len(req.History), req.Lang)
 
 	go func() {
+		startTime := time.Now()
 		ctx := context.Background()
 		resp, err := h.processChat(ctx, &req)
+		elapsed := time.Since(startTime)
 		if err != nil {
-			log.Printf("chat: processing error: %v", err)
+			log.Printf("chat: ✗ error after %s: %v", elapsed.Round(time.Millisecond), err)
 			h.sendResponse("chat:error", ChatErrorPayload{
 				ConversationID: req.ConversationID,
 				MessageID:      req.MessageID,
@@ -159,6 +163,8 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 			})
 			return
 		}
+		log.Printf("chat: ✓ completed in %s, model=%s, response_len=%d", elapsed.Round(time.Millisecond), resp.Model, len(resp.Content))
+		log.Printf("chat: ═══════════════════════════════════════")
 		h.sendResponse("chat:response", resp)
 	}()
 }
@@ -274,6 +280,8 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 	if model == "" {
 		model = os.Getenv("NLOOK_AI_MODEL")
 	}
+
+	log.Printf("chat: ├ MCP client: %v, engine: %v", h.mcpClient != nil, h.llmEngine != nil)
 
 	// Intent detection: directly call MCP tools without relying on model
 	if h.mcpClient != nil {
@@ -813,6 +821,14 @@ var localModelPrefixes = []string{
 	"qwen", "llama", "mistral", "codellama", "gemma", "phi",
 	"deepseek", "starcoder", "vicuna", "orca", "wizardcoder",
 	"ollama/", "local/",
+}
+
+func truncateLog(s string, maxLen int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 func isLocalModel(model string) bool {
