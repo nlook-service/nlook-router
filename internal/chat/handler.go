@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -151,6 +153,12 @@ func (h *Handler) HandleMessage(msgType string, payload json.RawMessage) bool {
 	}
 }
 
+func genTraceID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func (h *Handler) handleChatRequest(payload json.RawMessage) {
 	var req ChatRequestPayload
 	if err := json.Unmarshal(payload, &req); err != nil {
@@ -158,17 +166,21 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 		return
 	}
 
-	log.Printf("chat: ═══════════════════════════════════════")
-	log.Printf("chat: ▶ request conv=%d msg=%d query=%s", req.ConversationID, req.MessageID, truncateLog(req.Query, 80))
-	log.Printf("chat: ▶ history=%d messages, lang=%s", len(req.History), req.Lang)
+	traceID := genTraceID()
+
+	log.Printf("[%s] ═══ CHAT START ═══════════════════════════", traceID)
+	log.Printf("[%s] query: %s", traceID, truncateLog(req.Query, 100))
+	log.Printf("[%s] conv=%d msg=%d history=%d lang=%s", traceID, req.ConversationID, req.MessageID, len(req.History), req.Lang)
+	log.Printf("[%s] mcp=%v engine=%v tools=%v", traceID, h.mcpClient != nil, h.llmEngine != nil, h.toolExecutor != nil)
 
 	go func() {
 		startTime := time.Now()
-		ctx := context.Background()
+		ctx := context.WithValue(context.Background(), "trace_id", traceID)
 		resp, err := h.processChat(ctx, &req)
 		elapsed := time.Since(startTime)
 		if err != nil {
-			log.Printf("chat: ✗ error after %s: %v", elapsed.Round(time.Millisecond), err)
+			log.Printf("[%s] ✗ ERROR %s: %v", traceID, elapsed.Round(time.Millisecond), err)
+			log.Printf("[%s] ═══ CHAT END (error) ═════════════════════", traceID)
 			h.sendResponse("chat:error", ChatErrorPayload{
 				ConversationID: req.ConversationID,
 				MessageID:      req.MessageID,
@@ -176,8 +188,8 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 			})
 			return
 		}
-		log.Printf("chat: ✓ completed in %s, model=%s, response_len=%d", elapsed.Round(time.Millisecond), resp.Model, len(resp.Content))
-		log.Printf("chat: ═══════════════════════════════════════")
+		log.Printf("[%s] ✓ DONE %s model=%s len=%d", traceID, elapsed.Round(time.Millisecond), resp.Model, len(resp.Content))
+		log.Printf("[%s] ═══ CHAT END ═════════════════════════════", traceID)
 		h.sendResponse("chat:response", resp)
 	}()
 }
@@ -294,7 +306,10 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		model = os.Getenv("NLOOK_AI_MODEL")
 	}
 
-	log.Printf("chat: ├ MCP client: %v, engine: %v", h.mcpClient != nil, h.llmEngine != nil)
+	traceID, _ := ctx.Value("trace_id").(string)
+	tlog := func(format string, args ...interface{}) {
+		log.Printf("[%s] "+format, append([]interface{}{traceID}, args...)...)
+	}
 
 	// Intent detection: directly call MCP tools without relying on model
 	if h.mcpClient != nil {
@@ -302,7 +317,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		refContent := ExtractDocumentRefs(ctx, req.Query, h.mcpClient)
 		hasRefs := refContent != ""
 		if hasRefs {
-			log.Printf("chat: ├ found document/task references, fetching content")
+			tlog("ref: found document/task references")
 			req.Query = req.Query + refContent + "\n\nAbove is the referenced content. Analyze and respond based on this data."
 		}
 
@@ -344,7 +359,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 					continue
 				}
 				model = m.Name
-				log.Printf("chat: using local model %s", model)
+				tlog("model: using %s", model)
 				break
 			}
 		}

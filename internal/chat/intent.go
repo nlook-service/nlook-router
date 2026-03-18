@@ -91,19 +91,24 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 		return ""
 	}
 
+	traceID, _ := ctx.Value("trace_id").(string)
+	tlog := func(format string, args ...interface{}) {
+		log.Printf("[%s] "+format, append([]interface{}{traceID}, args...)...)
+	}
+
 	// Built-in tool execution (web_search, calculator, etc.)
 	if intent.Action == "web_search" || intent.Action == "calculator" {
 		if toolExec == nil {
-			log.Printf("intent: ⚠ no tool executor for %s", intent.Action)
+			tlog("intent: ⚠ no tool executor for %s", intent.Action)
 			return ""
 		}
-		log.Printf("intent: 🔧 calling built-in tool: %s", intent.Action)
+		tlog("intent: 🔧 calling built-in tool: %s", intent.Action)
 		result, err := toolExec.Execute(ctx, intent.Action, map[string]interface{}{"query": intent.Query})
 		if err != nil {
-			log.Printf("intent: ✗ tool exec failed: %v", err)
+			tlog("intent: ✗ tool exec failed: %v", err)
 			return fmt.Sprintf("[도구 오류: %v]", err)
 		}
-		log.Printf("intent: ✓ tool result size=%d bytes", len(result))
+		tlog("intent: ✓ tool result size=%d bytes", len(result))
 		resultStr := string(result)
 		if len(resultStr) > 3000 {
 			resultStr = resultStr[:3000] + "..."
@@ -115,25 +120,23 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 		return ""
 	}
 
-	log.Printf("intent: executing %s", intent.Action)
-
 	var result interface{}
 	var err error
 
-	log.Printf("intent: ▶ action=%s query=%s", intent.Action, truncateStr(intent.Query, 80))
+	tlog("intent: %s → %s", intent.Action, truncateStr(intent.Query, 60))
 
 	switch intent.Action {
 	case "list_tasks":
-		log.Printf("intent: 📋 calling list_tasks")
+		tlog("intent: 📋 calling list_tasks")
 		result, err = mcpClient.CallTool(ctx, "list_tasks", map[string]interface{}{"limit": 20})
 	case "list_documents":
-		log.Printf("intent: 📄 calling list_documents")
+		tlog("intent: 📄 calling list_documents")
 		result, err = mcpClient.CallTool(ctx, "list_documents", map[string]interface{}{"limit": 20})
 	case "confirm_create_task", "confirm_create_document":
-		log.Printf("intent: 📋 fetching workspaces for confirmation")
+		tlog("intent: 📋 fetching workspaces for confirmation")
 		wsResult, wsErr := mcpClient.CallTool(ctx, "list_workspaces", map[string]interface{}{})
 		if wsErr != nil {
-			log.Printf("intent: ✗ workspace fetch failed: %v", wsErr)
+			tlog("intent: ✗ workspace fetch failed: %v", wsErr)
 		}
 		wsData, _ := json.Marshal(wsResult)
 		itemType := "할일"
@@ -150,19 +153,19 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 	}
 
 	if err != nil {
-		log.Printf("intent: ✗ MCP call failed: %v", err)
+		tlog("intent: ✗ MCP call failed: %v", err)
 		return fmt.Sprintf("[도구 호출 오류: %v]", err)
 	}
 
 	data, _ := json.MarshalIndent(result, "", "  ")
-	log.Printf("intent: ✓ result size=%d bytes", len(data))
+	tlog("intent: ✓ result size=%d bytes", len(data))
 
 	// Truncate large results to prevent slow LLM processing
 	const maxResultSize = 3000
 	resultStr := string(data)
 	if len(resultStr) > maxResultSize {
 		resultStr = resultStr[:maxResultSize] + "\n... (truncated, showing first items)"
-		log.Printf("intent: ⚠ truncated from %d to %d bytes", len(data), maxResultSize)
+		tlog("intent: ⚠ truncated from %d to %d bytes", len(data), maxResultSize)
 	}
 	return resultStr
 }
@@ -206,6 +209,11 @@ func ExtractDocumentRefs(ctx context.Context, query string, mcpClient *mcp.Clien
 	if mcpClient == nil {
 		return ""
 	}
+	traceID, _ := ctx.Value("trace_id").(string)
+	refLog := func(format string, args ...interface{}) {
+		log.Printf("[%s] "+format, append([]interface{}{traceID}, args...)...)
+	}
+	_ = refLog
 
 	// Match [@document:123:title] or [@task:456:title]
 	patterns := []struct {
@@ -263,7 +271,7 @@ func ExtractDocumentRefs(ctx context.Context, query string, mcpClient *mcp.Clien
 						title = parts[1]
 					}
 					sb.WriteString(fmt.Sprintf("\n## %s\n%s\n", title, string(data)))
-					log.Printf("intent: fetched %s id=%.0f", p.tool, id)
+					refLog("ref: fetched %s id=%.0f", p.tool, id)
 				}
 			}
 			idx = end + 1
