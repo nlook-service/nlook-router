@@ -41,6 +41,7 @@ type ModelInfo struct {
 type ChatOptions struct {
 	Temperature float64
 	MaxTokens   int
+	History     []MessageEntry
 }
 
 // IsRunning checks if Ollama server is reachable.
@@ -154,10 +155,13 @@ type ChatResponse struct {
 }
 
 // ChatWithTools sends a chat with tool definitions (non-streaming) and returns tool calls if any.
-func (c *Client) ChatWithTools(ctx context.Context, model, system, prompt string, tools []map[string]interface{}) (*ChatResponse, error) {
+func (c *Client) ChatWithTools(ctx context.Context, model, system, prompt string, tools []map[string]interface{}, history []MessageEntry) (*ChatResponse, error) {
 	messages := []map[string]interface{}{}
 	if system != "" {
 		messages = append(messages, map[string]interface{}{"role": "system", "content": system})
+	}
+	for _, h := range history {
+		messages = append(messages, map[string]interface{}{"role": h.Role, "content": h.Content})
 	}
 	messages = append(messages, map[string]interface{}{"role": "user", "content": prompt})
 
@@ -283,12 +287,21 @@ func (c *Client) ChatWithToolResults(ctx context.Context, model, system, prompt 
 	return fullText, scanner.Err()
 }
 
+// MessageEntry is a conversation history entry.
+type MessageEntry struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 // ChatStream sends a chat message and streams the response token by token.
 // Returns the full response text.
 func (c *Client) ChatStream(ctx context.Context, model, system, prompt string, opts ChatOptions, onDelta func(text string)) (string, error) {
 	messages := []map[string]string{}
 	if system != "" {
 		messages = append(messages, map[string]string{"role": "system", "content": system})
+	}
+	for _, h := range opts.History {
+		messages = append(messages, map[string]string{"role": h.Role, "content": h.Content})
 	}
 	messages = append(messages, map[string]string{"role": "user", "content": prompt})
 

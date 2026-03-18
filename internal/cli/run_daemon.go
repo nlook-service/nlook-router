@@ -17,8 +17,9 @@ import (
 	"github.com/nlook-service/nlook-router/internal/executor"
 	"github.com/nlook-service/nlook-router/internal/heartbeat"
 	"github.com/nlook-service/nlook-router/internal/scheduler"
-	"github.com/nlook-service/nlook-router/internal/server"
+	"github.com/nlook-service/nlook-router/internal/cache"
 	"github.com/nlook-service/nlook-router/internal/chat"
+	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/ws"
@@ -102,18 +103,26 @@ func RunDaemon(cfg *config.Config) error {
 			execService.CancelRun(runID)
 		}
 
+		// Cache store for user data (documents, tasks)
+		cacheStore := cache.NewStore()
+		syncHandler := cache.NewSyncHandler(cacheStore)
+
 		// Wire chat messages from cloud → chat handler
 		chatHandler := chat.NewHandler(skillRunner, func(msg []byte) {
 			wsClient.Send(msg)
 		})
+		chatHandler.SetCacheStore(cacheStore)
 
 		// Wire SSH messages from cloud → SSH proxy
 		sshHandler := sshproxy.NewHandler(sshProxy, func(msg []byte) {
 			wsClient.Send(msg)
 		})
 
-		// Route messages: chat first, then SSH
+		// Route messages: sync first, then chat, then SSH
 		wsClient.OnMessage = func(msgType string, payload json.RawMessage) {
+			if syncHandler.HandleMessage(msgType, payload) {
+				return
+			}
 			if chatHandler.HandleMessage(msgType, payload) {
 				return
 			}

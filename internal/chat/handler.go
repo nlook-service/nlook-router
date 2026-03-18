@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nlook-service/nlook-router/internal/apiclient"
+	"github.com/nlook-service/nlook-router/internal/cache"
 	"github.com/nlook-service/nlook-router/internal/engine"
 	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/ollama"
@@ -26,13 +27,20 @@ type WSMessage struct {
 }
 
 // ChatRequestPayload is sent from cloud to request AI chat processing.
+// HistoryMessage is a previous message in the conversation.
+type HistoryMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 type ChatRequestPayload struct {
-	ConversationID int64  `json:"conversation_id"`
-	MessageID      int64  `json:"message_id"`
-	Query          string `json:"query"`
-	UserID         int64  `json:"user_id"`
-	Model          string `json:"model,omitempty"`
-	Lang           string `json:"lang,omitempty"`
+	ConversationID int64            `json:"conversation_id"`
+	MessageID      int64            `json:"message_id"`
+	Query          string           `json:"query"`
+	UserID         int64            `json:"user_id"`
+	Model          string           `json:"model,omitempty"`
+	Lang           string           `json:"lang,omitempty"`
+	History        []HistoryMessage `json:"history,omitempty"`
 }
 
 // ChatResponsePayload is sent back to cloud with the AI response.
@@ -65,7 +73,13 @@ type ChatErrorPayload struct {
 type Handler struct {
 	skillRunner *engine.SkillRunner
 	mcpClient   *mcp.Client
+	cacheStore  *cache.Store
 	sendWS      func(msg []byte)
+}
+
+// SetCacheStore sets the data cache for AI context.
+func (h *Handler) SetCacheStore(store *cache.Store) {
+	h.cacheStore = store
 }
 
 // NewHandler creates a new chat message handler.
@@ -136,19 +150,29 @@ Intent classification:
 
 Always confirm before creating/modifying content. Respond concisely.`
 
-func getSystemPrompt(lang string, query string) string {
-	// Auto-detect language from query if lang not provided
+func (h *Handler) getSystemPrompt(lang string, query string) string {
 	if lang == "" {
 		lang = detectLang(query)
 	}
+
+	prompt := baseSystemPrompt
+
+	// Add cached user data context
+	if h.cacheStore != nil {
+		if summary := h.cacheStore.Summary(); summary != "" {
+			prompt += summary
+		}
+	}
+
 	switch lang {
 	case "ko":
-		return baseSystemPrompt + "\n\nCRITICAL: You MUST respond ONLY in Korean (한국어). 절대로 중국어, 영어 등 다른 언어를 사용하지 마세요. 반드시 한국어로만 답변하세요."
+		prompt += "\n\nCRITICAL: You MUST respond ONLY in Korean (한국어). 절대로 중국어, 영어 등 다른 언어를 사용하지 마세요. 반드시 한국어로만 답변하세요."
 	case "en":
-		return baseSystemPrompt + "\n\nCRITICAL: You MUST respond ONLY in English. Never use any other language."
+		prompt += "\n\nCRITICAL: You MUST respond ONLY in English. Never use any other language."
 	default:
-		return baseSystemPrompt + "\n\nCRITICAL: Respond ONLY in the same language the user writes in. Never mix languages. Never use Chinese unless the user writes in Chinese."
+		prompt += "\n\nCRITICAL: Respond ONLY in the same language the user writes in. Never mix languages. Never use Chinese unless the user writes in Chinese."
 	}
+	return prompt
 }
 
 // detectLang detects language from text (simple heuristic).
@@ -168,6 +192,14 @@ func detectLang(text string) string {
 		}
 	}
 	return "en"
+}
+
+func (h *Handler) getOllamaHistory(req *ChatRequestPayload) []ollama.MessageEntry {
+	entries := make([]ollama.MessageEntry, 0, len(req.History))
+	for _, m := range req.History {
+		entries = append(entries, ollama.MessageEntry{Role: m.Role, Content: m.Content})
+	}
+	return entries
 }
 
 func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*ChatResponsePayload, error) {
@@ -234,7 +266,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 	}
 
 	// First LLM call
-	respBody, err := h.callAnthropic(ctx, apiKey, model, getSystemPrompt(req.Lang, req.Query), messages, anthropicTools)
+	respBody, err := h.callAnthropic(ctx, apiKey, model, h.getSystemPrompt(req.Lang, req.Query), messages, anthropicTools)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +320,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 		)
 
 		// Second call without tools (get final text response)
-		finalResp, err := h.callAnthropic(ctx, apiKey, model, getSystemPrompt(req.Lang, req.Query), messages, nil)
+		finalResp, err := h.callAnthropic(ctx, apiKey, model, h.getSystemPrompt(req.Lang, req.Query), messages, nil)
 		if err != nil {
 			return nil, fmt.Errorf("follow-up LLM call: %w", err)
 		}
@@ -314,7 +346,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 // processChatOllama uses local Ollama with tool calling + streaming.
 func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	ollamaClient := ollama.NewClient()
-	systemPrompt := getSystemPrompt(req.Lang, req.Query)
+	systemPrompt := h.getSystemPrompt(req.Lang, req.Query)
 
 	// If MCP client available, try tool calling first (non-streaming)
 	if h.mcpClient != nil {
@@ -331,7 +363,7 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 			}
 		}
 
-		resp, err := ollamaClient.ChatWithTools(ctx, model, systemPrompt, req.Query, ollamaTools)
+		resp, err := ollamaClient.ChatWithTools(ctx, model, systemPrompt, req.Query, ollamaTools, h.getOllamaHistory(req))
 		if err == nil && len(resp.ToolCalls) > 0 {
 			// Execute tool calls
 			toolResults := make([]map[string]interface{}, 0)
@@ -387,7 +419,7 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 
 	// Fallback: simple streaming chat without tools
 	fullText, err := ollamaClient.ChatStream(ctx, model, systemPrompt, req.Query,
-		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 4096},
+		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 4096, History: h.getOllamaHistory(req)},
 		func(text string) {
 			h.sendResponse("chat:delta", ChatDeltaPayload{
 				ConversationID: req.ConversationID,
@@ -416,7 +448,7 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 func (h *Handler) processChatSimple(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	output, _, err := h.skillRunner.RunSkill(ctx,
 		&apiclient.WorkflowSkill{Name: "chat", SkillType: "prompt", Content: req.Query},
-		&apiclient.WorkflowAgent{Model: model, SystemPrompt: getSystemPrompt(req.Lang, req.Query), MaxTokens: 4096, Temperature: 0.7},
+		&apiclient.WorkflowAgent{Model: model, SystemPrompt: h.getSystemPrompt(req.Lang, req.Query), MaxTokens: 4096, Temperature: 0.7},
 		nil,
 	)
 	if err != nil {
@@ -448,7 +480,7 @@ func (h *Handler) processChatStream(ctx context.Context, req *ChatRequestPayload
 	reqBody := anthropicRequest{
 		Model:       model,
 		MaxTokens:   4096,
-		System:      getSystemPrompt(req.Lang, req.Query),
+		System:      h.getSystemPrompt(req.Lang, req.Query),
 		Messages:    []map[string]interface{}{{"role": "user", "content": req.Query}},
 		Temperature: 0.7,
 		Stream:      true,
