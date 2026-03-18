@@ -136,15 +136,38 @@ Intent classification:
 
 Always confirm before creating/modifying content. Respond concisely.`
 
-func getSystemPrompt(lang string) string {
+func getSystemPrompt(lang string, query string) string {
+	// Auto-detect language from query if lang not provided
+	if lang == "" {
+		lang = detectLang(query)
+	}
 	switch lang {
 	case "ko":
-		return baseSystemPrompt + "\n\nIMPORTANT: You MUST respond entirely in Korean (한국어). 절대 다른 언어를 섞지 마세요."
+		return baseSystemPrompt + "\n\nCRITICAL: You MUST respond ONLY in Korean (한국어). 절대로 중국어, 영어 등 다른 언어를 사용하지 마세요. 반드시 한국어로만 답변하세요."
 	case "en":
-		return baseSystemPrompt + "\n\nIMPORTANT: You MUST respond entirely in English."
+		return baseSystemPrompt + "\n\nCRITICAL: You MUST respond ONLY in English. Never use any other language."
 	default:
-		return baseSystemPrompt + "\n\nIMPORTANT: Always respond in the SAME language the user writes in. Never mix languages."
+		return baseSystemPrompt + "\n\nCRITICAL: Respond ONLY in the same language the user writes in. Never mix languages. Never use Chinese unless the user writes in Chinese."
 	}
+}
+
+// detectLang detects language from text (simple heuristic).
+func detectLang(text string) string {
+	for _, r := range text {
+		if r >= 0xAC00 && r <= 0xD7AF { // Hangul syllables
+			return "ko"
+		}
+		if r >= 0x3131 && r <= 0x318E { // Hangul jamo
+			return "ko"
+		}
+		if r >= 0x4E00 && r <= 0x9FFF { // CJK (Chinese)
+			return "zh"
+		}
+		if r >= 0x3040 && r <= 0x30FF { // Japanese
+			return "ja"
+		}
+	}
+	return "en"
 }
 
 func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*ChatResponsePayload, error) {
@@ -211,7 +234,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 	}
 
 	// First LLM call
-	respBody, err := h.callAnthropic(ctx, apiKey, model, getSystemPrompt(req.Lang), messages, anthropicTools)
+	respBody, err := h.callAnthropic(ctx, apiKey, model, getSystemPrompt(req.Lang, req.Query), messages, anthropicTools)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +288,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 		)
 
 		// Second call without tools (get final text response)
-		finalResp, err := h.callAnthropic(ctx, apiKey, model, getSystemPrompt(req.Lang), messages, nil)
+		finalResp, err := h.callAnthropic(ctx, apiKey, model, getSystemPrompt(req.Lang, req.Query), messages, nil)
 		if err != nil {
 			return nil, fmt.Errorf("follow-up LLM call: %w", err)
 		}
@@ -292,7 +315,7 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	ollamaClient := ollama.NewClient()
 
-	fullText, err := ollamaClient.ChatStream(ctx, model, getSystemPrompt(req.Lang), req.Query,
+	fullText, err := ollamaClient.ChatStream(ctx, model, getSystemPrompt(req.Lang, req.Query), req.Query,
 		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 4096},
 		func(text string) {
 			h.sendResponse("chat:delta", ChatDeltaPayload{
@@ -330,7 +353,7 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 func (h *Handler) processChatSimple(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	output, _, err := h.skillRunner.RunSkill(ctx,
 		&apiclient.WorkflowSkill{Name: "chat", SkillType: "prompt", Content: req.Query},
-		&apiclient.WorkflowAgent{Model: model, SystemPrompt: getSystemPrompt(req.Lang), MaxTokens: 4096, Temperature: 0.7},
+		&apiclient.WorkflowAgent{Model: model, SystemPrompt: getSystemPrompt(req.Lang, req.Query), MaxTokens: 4096, Temperature: 0.7},
 		nil,
 	)
 	if err != nil {
@@ -362,7 +385,7 @@ func (h *Handler) processChatStream(ctx context.Context, req *ChatRequestPayload
 	reqBody := anthropicRequest{
 		Model:       model,
 		MaxTokens:   4096,
-		System:      getSystemPrompt(req.Lang),
+		System:      getSystemPrompt(req.Lang, req.Query),
 		Messages:    []map[string]interface{}{{"role": "user", "content": req.Query}},
 		Temperature: 0.7,
 		Stream:      true,
