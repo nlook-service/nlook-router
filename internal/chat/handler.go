@@ -112,12 +112,18 @@ func (h *Handler) rebuildPromptBuilder() {
 }
 
 // NewHandler creates a new chat message handler.
-func NewHandler(skillRunner *engine.SkillRunner, sendWS func(msg []byte)) *Handler {
-	// Create MCP client if API key is available
-	apiKey := os.Getenv("NLOOK_API_KEY")
+// apiKey is from config (~/.nlook/config.yaml api_key).
+func NewHandler(skillRunner *engine.SkillRunner, sendWS func(msg []byte), apiKey string) *Handler {
+	// Create MCP client: config api_key → env NLOOK_API_KEY fallback
+	if apiKey == "" {
+		apiKey = os.Getenv("NLOOK_API_KEY")
+	}
 	var mcpClient *mcp.Client
 	if apiKey != "" {
 		mcpClient = mcp.NewClient(apiKey)
+		log.Printf("chat: MCP client created with API key (len=%d)", len(apiKey))
+	} else {
+		log.Printf("chat: ⚠ No API key — MCP tools disabled. Set api_key in ~/.nlook/config.yaml")
 	}
 
 	return &Handler{

@@ -129,7 +129,7 @@ func RunDaemon(cfg *config.Config) error {
 		// Wire chat messages from cloud → chat handler
 		chatHandler := chat.NewHandler(skillRunner, func(msg []byte) {
 			wsClient.Send(msg)
-		})
+		}, cfg.APIKey)
 		memoryStore := memory.NewStore()
 		chatHandler.SetCacheStore(cacheStore)
 		chatHandler.SetVectorStore(vectorStore)
