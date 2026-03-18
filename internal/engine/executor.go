@@ -149,12 +149,16 @@ func (e *StepExecutor) executeSkillNode(ctx context.Context, node *apiclient.Wor
 	if skillID == 0 && node.RefID != 0 {
 		skillID = node.RefID
 	}
+	// Fallback: nested skill object (data.skill.id)
+	if skillID == 0 {
+		skillID = extractNestedInt64(node.Data, "skill", "id")
+	}
 
 	if skillID == 0 {
 		return &StepResult{
 			Output:   map[string]interface{}{"message": "no skill attached, passthrough"},
 			Status:   "completed",
-			LogLines: []string{"no skill_id found, executing as passthrough"},
+			LogLines: []string{fmt.Sprintf("no skill_id found (ref_id=%d, data_keys=%v)", node.RefID, dataKeys(node.Data))},
 		}
 	}
 
@@ -189,12 +193,16 @@ func (e *StepExecutor) executeAgentNode(ctx context.Context, node *apiclient.Wor
 	if agentID == 0 && node.RefID != 0 {
 		agentID = node.RefID
 	}
+	// Fallback: nested agent object (data.agent.id)
+	if agentID == 0 {
+		agentID = extractNestedInt64(node.Data, "agent", "id")
+	}
 
 	if agentID == 0 {
 		return &StepResult{
 			Output:   map[string]interface{}{"message": "no agent attached, passthrough"},
 			Status:   "completed",
-			LogLines: []string{"no agent_id found, executing as passthrough"},
+			LogLines: []string{fmt.Sprintf("no agent_id found (ref_id=%d, data_keys=%v)", node.RefID, dataKeys(node.Data))},
 		}
 	}
 
@@ -241,6 +249,31 @@ func (e *StepExecutor) executeAgentNode(ctx context.Context, node *apiclient.Wor
 		Status:   "completed",
 		LogLines: logs,
 	}
+}
+
+// extractNestedInt64 extracts an int64 from a nested map: data[outerKey][innerKey].
+func extractNestedInt64(data map[string]interface{}, outerKey, innerKey string) int64 {
+	if data == nil {
+		return 0
+	}
+	outer, ok := data[outerKey]
+	if !ok {
+		return 0
+	}
+	m, ok := outer.(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	return extractInt64(m, innerKey)
+}
+
+// dataKeys returns the keys of a map for debug logging.
+func dataKeys(data map[string]interface{}) []string {
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // extractInt64 safely extracts an int64 from a map[string]interface{}.
