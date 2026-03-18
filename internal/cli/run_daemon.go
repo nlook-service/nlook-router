@@ -18,6 +18,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/heartbeat"
 	"github.com/nlook-service/nlook-router/internal/scheduler"
 	"github.com/nlook-service/nlook-router/internal/server"
+	"github.com/nlook-service/nlook-router/internal/chat"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/ws"
@@ -100,11 +101,21 @@ func RunDaemon(cfg *config.Config) error {
 			execService.CancelRun(runID)
 		}
 
+		// Wire chat messages from cloud → chat handler
+		chatHandler := chat.NewHandler(skillRunner, func(msg []byte) {
+			wsClient.Send(msg)
+		})
+
 		// Wire SSH messages from cloud → SSH proxy
 		sshHandler := sshproxy.NewHandler(sshProxy, func(msg []byte) {
 			wsClient.Send(msg)
 		})
+
+		// Route messages: chat first, then SSH
 		wsClient.OnMessage = func(msgType string, payload json.RawMessage) {
+			if chatHandler.HandleMessage(msgType, payload) {
+				return
+			}
 			sshHandler.HandleMessage(msgType, payload)
 		}
 
