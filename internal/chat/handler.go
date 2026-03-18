@@ -116,7 +116,13 @@ When the user wants to:
 - Check tasks → use the list_tasks tool
 - See workspaces → use the list_workspaces tool
 
-Always confirm with the user before creating content. Respond concisely in the user's language.`
+Intent classification:
+1. If the message looks like content to save → ask if it's a document or task, suggest workspace
+2. If asking about existing content → search and show results
+3. If general question → answer directly without tools
+
+Always confirm before creating/modifying content. Respond concisely in the user's language.
+When suggesting actions, describe what you can do clearly.`
 
 func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*ChatResponsePayload, error) {
 	model := req.Model
