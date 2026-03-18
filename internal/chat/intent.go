@@ -42,24 +42,24 @@ func DetectIntent(query string) *Intent {
 	agentKeywords := []string{"에이전트", "agent", "워크플로우", "workflow"}
 	isAgent := containsAny(q, agentKeywords)
 
-	// Determine intent
-	if isTask && (isList || !isCreate) {
-		return &Intent{Action: "list_tasks", Query: query}
-	}
-	if isTask && isCreate {
-		return &Intent{Action: "create_task", Query: query}
-	}
-	if isDoc && (isList || !isCreate) {
-		return &Intent{Action: "list_documents", Query: query}
-	}
-	if isDoc && isCreate {
-		return &Intent{Action: "create_document", Query: query}
-	}
+	// Determine intent (order matters: specific first)
 	if isWS {
 		return &Intent{Action: "list_workspaces", Query: query}
 	}
 	if isAgent {
 		return &Intent{Action: "list_agents", Query: query}
+	}
+	if isTask && isCreate {
+		return &Intent{Action: "create_task", Query: query}
+	}
+	if isTask && (isList || !isCreate) {
+		return &Intent{Action: "list_tasks", Query: query}
+	}
+	if isDoc && isCreate {
+		return &Intent{Action: "create_document", Query: query}
+	}
+	if isDoc && (isList || !isCreate) {
+		return &Intent{Action: "list_documents", Query: query}
 	}
 
 	return nil
@@ -112,7 +112,15 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client) s
 
 	data, _ := json.MarshalIndent(result, "", "  ")
 	log.Printf("intent: ✓ result size=%d bytes", len(data))
-	return string(data)
+
+	// Truncate large results to prevent slow LLM processing
+	const maxResultSize = 3000
+	resultStr := string(data)
+	if len(resultStr) > maxResultSize {
+		resultStr = resultStr[:maxResultSize] + "\n... (truncated, showing first items)"
+		log.Printf("intent: ⚠ truncated from %d to %d bytes", len(data), maxResultSize)
+	}
+	return resultStr
 }
 
 // extractTitle tries to extract a meaningful title from the query.

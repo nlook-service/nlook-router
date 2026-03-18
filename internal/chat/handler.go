@@ -299,9 +299,17 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 
 		// 2. Auto-detect intent and call MCP tools
 		if intent := DetectIntent(req.Query); intent != nil {
+			// Send immediate feedback: "데이터 조회 중..."
+			h.sendResponse("chat:delta", ChatDeltaPayload{
+				ConversationID: req.ConversationID,
+				MessageID:      req.MessageID,
+				Delta:          "🔍 ",
+				Done:           false,
+			})
+
 			toolResult := ExecuteIntent(ctx, intent, h.mcpClient)
 			if toolResult != "" {
-				req.Query = fmt.Sprintf("%s\n\n[Tool Result: %s]\n%s\n[End Tool Result]\n\nAbove is the data from the system. Summarize and present it to the user.", req.Query, intent.Action, toolResult)
+				req.Query = fmt.Sprintf("%s\n\n[Tool Result: %s]\n%s\n[End Tool Result]\n\nAbove is the data. Present it clearly and concisely to the user.", req.Query, intent.Action, toolResult)
 			}
 		}
 	}
