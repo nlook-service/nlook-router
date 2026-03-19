@@ -355,55 +355,50 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		} // end !hasRefs
 	}
 
-	// Smart routing: qwen classifies complexity → simple=local, complex=Claude
+	// qwen classifier only used for future routing decisions (e.g. model selection)
+	// For now, all responses go to Claude CLI (qwen quality insufficient for chat)
 	localModel := h.findLocalModel(ctx, model)
-	complexity := h.classifyComplexity(ctx, req.Query, localModel, tlog)
+	complexity := "default"
+
+	// Fast keyword classification (no qwen call — saves 1-2s)
+	if len(strings.TrimSpace(req.Query)) < 10 {
+		complexity = "simple"
+	}
+	_ = localModel // used as last resort fallback
 
 	switch complexity {
-	case "simple":
-		// Simple: qwen streaming directly (no tool calling, fast, free)
-		if localModel != "" {
-			tlog("route: local %s (simple, stream-only)", localModel)
-			return h.processChatOllamaSimple(ctx, req, localModel)
-		}
-
-	case "complex":
-		// Complex: Claude CLI → Gemini → Ollama fallback
-		claudePath := findClaude()
-		if claudePath != "" {
-			tlog("route: Claude Code CLI (complex)")
-			resp, err := h.processChatClaudeCLI(ctx, req, claudePath)
-			if err == nil {
-				return resp, nil
-			}
-			tlog("route: Claude CLI failed: %v, trying Gemini", err)
-		}
-
-		geminiClient := gemini.NewClient()
-		if geminiClient != nil {
-			tlog("route: Gemini Cloud (%s)", geminiClient.Model())
-			resp, err := h.processChatGemini(ctx, req, geminiClient)
-			if err == nil {
-				return resp, nil
-			}
-			tlog("route: Gemini failed: %v", err)
-		}
+	default:
+		// noop — fall through to Claude
 	}
 
-	// Fallback: local model for anything
+	// All responses: Claude CLI → Gemini → Ollama (qwen = classifier only, not responder)
+	claudePath := findClaude()
+	if claudePath != "" {
+		tlog("route: Claude Code CLI (%s)", complexity)
+		resp, err := h.processChatClaudeCLI(ctx, req, claudePath)
+		if err == nil {
+			return resp, nil
+		}
+		tlog("route: Claude CLI failed: %v, trying Gemini", err)
+	}
+
+	geminiClient := gemini.NewClient()
+	if geminiClient != nil {
+		tlog("route: Gemini Cloud (%s)", geminiClient.Model())
+		resp, err := h.processChatGemini(ctx, req, geminiClient)
+		if err == nil {
+			return resp, nil
+		}
+		tlog("route: Gemini failed: %v", err)
+	}
+
+	// Last resort: local model
 	if localModel != "" {
-		tlog("route: local %s (fallback)", localModel)
+		tlog("route: local %s (last resort)", localModel)
 		return h.processChatOllama(ctx, req, localModel)
 	}
 
-	// Last resort: Claude CLI
-	claudePath := findClaude()
-	if claudePath != "" {
-		tlog("route: Claude Code CLI (last resort)")
-		return h.processChatClaudeCLI(ctx, req, claudePath)
-	}
-
-	return nil, fmt.Errorf("no LLM available: configure Ollama or Claude Code CLI")
+	return nil, fmt.Errorf("no LLM available: configure Claude Code CLI, Gemini, or Ollama")
 }
 
 // processChatWithTools uses Anthropic API with tool_use for MCP integration.
@@ -1030,18 +1025,18 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 func (h *Handler) processChatOllamaSimple(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	ollamaClient := ollama.NewClient()
 
-	// Simple system prompt for small model — avoid prompt regurgitation
-	systemPrompt := "You are nlook AI assistant. Be concise and helpful."
+	// Minimal prompt for small model — short answers only
+	systemPrompt := "You are nlook AI. Reply in 1-2 sentences max."
 	for _, r := range req.Query {
 		if r >= 0xAC00 && r <= 0xD7AF {
-			systemPrompt = "당신은 nlook AI 어시스턴트입니다. 간결하고 도움이 되게 답변하세요."
+			systemPrompt = "nlook AI입니다. 1-2문장으로 짧게 답변하세요."
 			break
 		}
 	}
 
 	streamStart := time.Now()
 	fullText, inTok, outTok, err := ollamaClient.ChatStream(ctx, model, systemPrompt, req.Query,
-		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 2048, History: h.getOllamaHistory(req)},
+		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 256, History: h.getOllamaHistory(req)},
 		func(text string) {
 			h.sendResponse("chat:delta", ChatDeltaPayload{
 				ConversationID: req.ConversationID,
