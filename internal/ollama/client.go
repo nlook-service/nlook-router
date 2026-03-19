@@ -149,9 +149,11 @@ type ToolCall struct {
 
 // ChatResponse holds the result of a non-streaming chat.
 type ChatResponse struct {
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	Done      bool       `json:"done"`
+	Content        string     `json:"content"`
+	ToolCalls      []ToolCall `json:"tool_calls,omitempty"`
+	Done           bool       `json:"done"`
+	PromptEvalCount int       `json:"prompt_eval_count,omitempty"`
+	EvalCount       int       `json:"eval_count,omitempty"`
 }
 
 // ChatWithTools sends a chat with tool definitions (non-streaming) and returns tool calls if any.
@@ -197,21 +199,26 @@ func (c *Client) ChatWithTools(ctx context.Context, model, system, prompt string
 			Content   string     `json:"content"`
 			ToolCalls []ToolCall `json:"tool_calls"`
 		} `json:"message"`
-		Done bool `json:"done"`
+		Done            bool `json:"done"`
+		PromptEvalCount int  `json:"prompt_eval_count"`
+		EvalCount       int  `json:"eval_count"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 
 	return &ChatResponse{
-		Content:   result.Message.Content,
-		ToolCalls: result.Message.ToolCalls,
-		Done:      result.Done,
+		Content:         result.Message.Content,
+		ToolCalls:       result.Message.ToolCalls,
+		Done:            result.Done,
+		PromptEvalCount: result.PromptEvalCount,
+		EvalCount:       result.EvalCount,
 	}, nil
 }
 
 // ChatWithToolResults sends tool results back to the model for final response (streaming).
-func (c *Client) ChatWithToolResults(ctx context.Context, model, system, prompt string, toolCalls []ToolCall, toolResults []map[string]interface{}, onDelta func(string)) (string, error) {
+// Returns full text, input tokens, output tokens, error.
+func (c *Client) ChatWithToolResults(ctx context.Context, model, system, prompt string, toolCalls []ToolCall, toolResults []map[string]interface{}, onDelta func(string)) (string, int, int, error) {
 	messages := []map[string]interface{}{}
 	if system != "" {
 		messages = append(messages, map[string]interface{}{"role": "system", "content": system})
@@ -252,18 +259,19 @@ func (c *Client) ChatWithToolResults(ctx context.Context, model, system, prompt 
 	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewBuffer(body))
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return "", 0, 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("chat request: %w", err)
+		return "", 0, 0, fmt.Errorf("chat request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var fullText string
+	var inputTokens, outputTokens int
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 64*1024)
 	for scanner.Scan() {
@@ -271,7 +279,9 @@ func (c *Client) ChatWithToolResults(ctx context.Context, model, system, prompt 
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
-			Done bool `json:"done"`
+			Done            bool `json:"done"`
+			PromptEvalCount int  `json:"prompt_eval_count"`
+			EvalCount       int  `json:"eval_count"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			continue
@@ -283,10 +293,12 @@ func (c *Client) ChatWithToolResults(ctx context.Context, model, system, prompt 
 			}
 		}
 		if event.Done {
+			inputTokens = event.PromptEvalCount
+			outputTokens = event.EvalCount
 			break
 		}
 	}
-	return fullText, scanner.Err()
+	return fullText, inputTokens, outputTokens, scanner.Err()
 }
 
 // MessageEntry is a conversation history entry.
@@ -296,8 +308,8 @@ type MessageEntry struct {
 }
 
 // ChatStream sends a chat message and streams the response token by token.
-// Returns the full response text.
-func (c *Client) ChatStream(ctx context.Context, model, system, prompt string, opts ChatOptions, onDelta func(text string)) (string, error) {
+// Returns full text, input tokens, output tokens, error.
+func (c *Client) ChatStream(ctx context.Context, model, system, prompt string, opts ChatOptions, onDelta func(text string)) (string, int, int, error) {
 	messages := []map[string]string{}
 	if system != "" {
 		messages = append(messages, map[string]string{"role": "system", "content": system})
@@ -344,23 +356,24 @@ func (c *Client) ChatStream(ctx context.Context, model, system, prompt string, o
 	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewBuffer(body))
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return "", 0, 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("chat request: %w", err)
+		return "", 0, 0, fmt.Errorf("chat request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("chat failed: status=%d body=%s", resp.StatusCode, string(respBody))
+		return "", 0, 0, fmt.Errorf("chat failed: status=%d body=%s", resp.StatusCode, string(respBody))
 	}
 
 	var fullText string
+	var inputTokens, outputTokens int
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 64*1024)
 	for scanner.Scan() {
@@ -368,7 +381,9 @@ func (c *Client) ChatStream(ctx context.Context, model, system, prompt string, o
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
-			Done bool `json:"done"`
+			Done            bool `json:"done"`
+			PromptEvalCount int  `json:"prompt_eval_count"`
+			EvalCount       int  `json:"eval_count"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			continue
@@ -380,8 +395,10 @@ func (c *Client) ChatStream(ctx context.Context, model, system, prompt string, o
 			}
 		}
 		if event.Done {
+			inputTokens = event.PromptEvalCount
+			outputTokens = event.EvalCount
 			break
 		}
 	}
-	return fullText, scanner.Err()
+	return fullText, inputTokens, outputTokens, scanner.Err()
 }

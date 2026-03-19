@@ -63,7 +63,8 @@ type generationConfig struct {
 }
 
 // ChatStream sends a streaming request and calls onDelta for each token.
-func (c *Client) ChatStream(ctx context.Context, system string, messages []map[string]string, onDelta func(string)) (string, error) {
+// Returns full text, input tokens, output tokens, error.
+func (c *Client) ChatStream(ctx context.Context, system string, messages []map[string]string, onDelta func(string)) (string, int, int, error) {
 	contents := make([]message, 0, len(messages))
 	for _, m := range messages {
 		role := m["role"]
@@ -92,29 +93,30 @@ func (c *Client) ChatStream(ctx context.Context, system string, messages []map[s
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", fmt.Errorf("marshal gemini request: %w", err)
+		return "", 0, 0, fmt.Errorf("marshal gemini request: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/%s:streamGenerateContent?alt=sse&key=%s", baseURL, c.model, c.apiKey)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(body))
 	if err != nil {
-		return "", fmt.Errorf("create gemini request: %w", err)
+		return "", 0, 0, fmt.Errorf("create gemini request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("gemini API call: %w", err)
+		return "", 0, 0, fmt.Errorf("gemini API call: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("gemini API error: status=%d body=%s", resp.StatusCode, truncate(string(respBody), 300))
+		return "", 0, 0, fmt.Errorf("gemini API error: status=%d body=%s", resp.StatusCode, truncate(string(respBody), 300))
 	}
 
 	// Parse SSE stream
 	var fullText strings.Builder
+	var lastInputTokens, lastOutputTokens int
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -131,9 +133,17 @@ func (c *Client) ChatStream(ctx context.Context, system string, messages []map[s
 					} `json:"parts"`
 				} `json:"content"`
 			} `json:"candidates"`
+			UsageMetadata struct {
+				PromptTokenCount     int `json:"promptTokenCount"`
+				CandidatesTokenCount int `json:"candidatesTokenCount"`
+			} `json:"usageMetadata"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
+		}
+		if chunk.UsageMetadata.PromptTokenCount > 0 {
+			lastInputTokens = chunk.UsageMetadata.PromptTokenCount
+			lastOutputTokens = chunk.UsageMetadata.CandidatesTokenCount
 		}
 		for _, c := range chunk.Candidates {
 			for _, p := range c.Content.Parts {
@@ -147,7 +157,7 @@ func (c *Client) ChatStream(ctx context.Context, system string, messages []map[s
 		}
 	}
 
-	return fullText.String(), nil
+	return fullText.String(), lastInputTokens, lastOutputTokens, nil
 }
 
 func truncate(s string, maxLen int) string {

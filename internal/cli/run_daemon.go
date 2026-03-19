@@ -26,6 +26,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
+	"github.com/nlook-service/nlook-router/internal/usage"
 	"github.com/nlook-service/nlook-router/internal/ws"
 )
 
@@ -145,10 +146,13 @@ func RunDaemon(cfg *config.Config) error {
 		vectorStore := embedding.NewVectorStore(embedder)
 		syncHandler.SetVectorStore(vectorStore)
 
+		// Usage tracker — persists to ~/.nlook/usage.json
+		usageTracker := usage.NewTracker(config.ConfigDir() + "/usage.json")
+
 		// Wire chat messages from cloud → chat handler
 		chatHandler := chat.NewHandler(skillRunner, func(msg []byte) {
 			wsClient.Send(msg)
-		}, cfg.APIKey)
+		}, cfg.APIKey, usageTracker)
 		memoryStore := memory.NewStore()
 		chatHandler.SetCacheStore(cacheStore)
 		chatHandler.SetVectorStore(vectorStore)

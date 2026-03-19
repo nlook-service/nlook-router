@@ -56,7 +56,7 @@ func (s *Server) aiSearchHandler(w http.ResponseWriter, r *http.Request) {
 
 	var fullText strings.Builder
 
-	_, err := client.ChatStream(r.Context(), model, system, message,
+	_, _, _, err := client.ChatStream(r.Context(), model, system, message,
 		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 4096},
 		func(text string) {
 			fullText.WriteString(text)

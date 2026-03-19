@@ -27,6 +27,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/ollama"
+	"github.com/nlook-service/nlook-router/internal/usage"
 )
 
 // WSMessage mirrors the WebSocket message format.
@@ -92,6 +93,7 @@ type Handler struct {
 	llmEngine     *llm.Engine
 	toolExecutor  tools.Executor
 	promptBuilder *PromptBuilder
+	usageTracker  *usage.Tracker
 	sendWS        func(msg []byte)
 }
 
@@ -129,7 +131,7 @@ func (h *Handler) rebuildPromptBuilder() {
 
 // NewHandler creates a new chat message handler.
 // apiKey is from config (~/.nlook/config.yaml api_key).
-func NewHandler(skillRunner *engine.SkillRunner, sendWS func(msg []byte), apiKey string) *Handler {
+func NewHandler(skillRunner *engine.SkillRunner, sendWS func(msg []byte), apiKey string, usageTracker *usage.Tracker) *Handler {
 	// Create MCP client: config api_key → env NLOOK_API_KEY fallback
 	if apiKey == "" {
 		apiKey = os.Getenv("NLOOK_API_KEY")
@@ -139,13 +141,14 @@ func NewHandler(skillRunner *engine.SkillRunner, sendWS func(msg []byte), apiKey
 		mcpClient = mcp.NewClient(apiKey)
 		log.Printf("chat: MCP client created with API key (len=%d)", len(apiKey))
 	} else {
-		log.Printf("chat: ⚠ No API key — MCP tools disabled. Set api_key in ~/.nlook/config.yaml")
+		log.Printf("chat: No API key — MCP tools disabled. Set api_key in ~/.nlook/config.yaml")
 	}
 
 	return &Handler{
-		skillRunner: skillRunner,
-		mcpClient:   mcpClient,
-		sendWS:      sendWS,
+		skillRunner:  skillRunner,
+		mcpClient:    mcpClient,
+		usageTracker: usageTracker,
+		sendWS:       sendWS,
 	}
 }
 
@@ -574,7 +577,8 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 			}
 
 			// Send tool results back to model for final streaming response
-			fullText, err := ollamaClient.ChatWithToolResults(ctx, model, systemPrompt, req.Query, resp.ToolCalls, toolResults,
+			toolStart := time.Now()
+			fullText, inTok, outTok, err := ollamaClient.ChatWithToolResults(ctx, model, systemPrompt, req.Query, resp.ToolCalls, toolResults,
 				func(text string) {
 					h.sendResponse("chat:delta", ChatDeltaPayload{
 						ConversationID: req.ConversationID,
@@ -585,13 +589,21 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 				},
 			)
 			if err == nil {
+				if h.usageTracker != nil {
+					h.usageTracker.Record(usage.TokenUsage{
+						UserID: req.UserID, Provider: "ollama", Model: model, Category: "chat",
+						InputTokens: inTok, OutputTokens: outTok, ElapsedMs: time.Since(toolStart).Milliseconds(),
+					})
+				}
 				h.sendResponse("chat:delta", ChatDeltaPayload{
 					ConversationID: req.ConversationID, MessageID: req.MessageID,
 					Delta: "", Done: true, FullContent: fullText, Model: model,
+					TokensUsed: inTok + outTok,
 				})
 				return &ChatResponsePayload{
 					ConversationID: req.ConversationID, MessageID: req.MessageID,
 					Content: fullText, Model: model, Role: "assistant",
+					TokensUsed: inTok + outTok,
 				}, nil
 			}
 			log.Printf("chat: tool result follow-up failed: %v, falling back", err)
@@ -611,7 +623,8 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 	}
 
 	// Fallback: simple streaming chat without tools
-	fullText, err := ollamaClient.ChatStream(ctx, model, systemPrompt, req.Query,
+	streamStart := time.Now()
+	fullText, inTok, outTok, err := ollamaClient.ChatStream(ctx, model, systemPrompt, req.Query,
 		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 4096, History: h.getOllamaHistory(req)},
 		func(text string) {
 			h.sendResponse("chat:delta", ChatDeltaPayload{
@@ -626,16 +639,25 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 		return nil, fmt.Errorf("ollama chat: %w", err)
 	}
 
+	if h.usageTracker != nil {
+		h.usageTracker.Record(usage.TokenUsage{
+			UserID: req.UserID, Provider: "ollama", Model: model, Category: "chat",
+			InputTokens: inTok, OutputTokens: outTok, ElapsedMs: time.Since(streamStart).Milliseconds(),
+		})
+	}
+
 	fullText = stripThinking(fullText)
 
 	h.sendResponse("chat:delta", ChatDeltaPayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Delta: "", Done: true, FullContent: fullText, Model: model,
+		TokensUsed: inTok + outTok,
 	})
 
 	return &ChatResponsePayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Content: fullText, Model: model, Role: "assistant",
+		TokensUsed: inTok + outTok,
 	}, nil
 }
 
@@ -934,13 +956,36 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 	}
 	prompt.WriteString(req.Query)
 
-	cmd := exec.CommandContext(ctx, claudePath, "-p", prompt.String(), "--model", "claude-haiku-4-5-20251001", "--output-format", "text")
+	cliStart := time.Now()
+	cmd := exec.CommandContext(ctx, claudePath, "-p", prompt.String(), "--model", "claude-haiku-4-5-20251001", "--output-format", "json")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("claude CLI: %w", err)
 	}
 
-	content := stripThinking(strings.TrimSpace(string(output)))
+	var cliResult struct {
+		Result string `json:"result"`
+		Usage  struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	rawOutput := strings.TrimSpace(string(output))
+	if jsonErr := json.Unmarshal([]byte(rawOutput), &cliResult); jsonErr != nil {
+		// Fallback: treat entire output as plain text
+		cliResult.Result = rawOutput
+	}
+
+	content := stripThinking(strings.TrimSpace(cliResult.Result))
+	inTok := cliResult.Usage.InputTokens
+	outTok := cliResult.Usage.OutputTokens
+
+	if h.usageTracker != nil {
+		h.usageTracker.Record(usage.TokenUsage{
+			UserID: req.UserID, Provider: "claude-cli", Model: "claude-haiku-4-5", Category: "chat",
+			InputTokens: inTok, OutputTokens: outTok, ElapsedMs: time.Since(cliStart).Milliseconds(),
+		})
+	}
 
 	model := "claude-haiku-4-5 (CLI)"
 
@@ -952,11 +997,13 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 	h.sendResponse("chat:delta", ChatDeltaPayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Delta: "", Done: true, FullContent: content, Model: model,
+		TokensUsed: inTok + outTok,
 	})
 
 	return &ChatResponsePayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Content: content, Model: model, Role: "assistant",
+		TokensUsed: inTok + outTok,
 	}, nil
 }
 
@@ -1055,7 +1102,8 @@ func (h *Handler) processChatGemini(ctx context.Context, req *ChatRequestPayload
 	}
 	messages = append(messages, map[string]string{"role": "user", "content": req.Query})
 
-	fullText, err := client.ChatStream(ctx, systemPrompt, messages,
+	geminiStart := time.Now()
+	fullText, inTok, outTok, err := client.ChatStream(ctx, systemPrompt, messages,
 		func(text string) {
 			h.sendResponse("chat:delta", ChatDeltaPayload{
 				ConversationID: req.ConversationID,
@@ -1069,14 +1117,23 @@ func (h *Handler) processChatGemini(ctx context.Context, req *ChatRequestPayload
 		return nil, fmt.Errorf("gemini chat: %w", err)
 	}
 
+	if h.usageTracker != nil {
+		h.usageTracker.Record(usage.TokenUsage{
+			UserID: req.UserID, Provider: "gemini", Model: client.Model(), Category: "chat",
+			InputTokens: inTok, OutputTokens: outTok, ElapsedMs: time.Since(geminiStart).Milliseconds(),
+		})
+	}
+
 	model := client.Model()
 	h.sendResponse("chat:delta", ChatDeltaPayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Delta: "", Done: true, FullContent: fullText, Model: model,
+		TokensUsed: inTok + outTok,
 	})
 
 	return &ChatResponsePayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Content: fullText, Model: model, Role: "assistant",
+		TokensUsed: inTok + outTok,
 	}, nil
 }
