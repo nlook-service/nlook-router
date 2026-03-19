@@ -355,16 +355,9 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		} // end !hasRefs
 	}
 
-	// qwen classifier only used for future routing decisions (e.g. model selection)
-	// For now, all responses go to Claude CLI (qwen quality insufficient for chat)
+	// qwen classifies intent (tracked in usage stats), all responses via Claude
 	localModel := h.findLocalModel(ctx, model)
-	complexity := "default"
-
-	// Fast keyword classification (no qwen call — saves 1-2s)
-	if len(strings.TrimSpace(req.Query)) < 10 {
-		complexity = "simple"
-	}
-	_ = localModel // used as last resort fallback
+	complexity := h.classifyComplexity(ctx, req.Query, localModel, tlog)
 
 	switch complexity {
 	default:
