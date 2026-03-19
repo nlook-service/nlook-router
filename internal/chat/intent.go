@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 
 	"github.com/nlook-service/nlook-router/internal/mcp"
@@ -331,6 +332,46 @@ func ExtractDocumentRefs(ctx context.Context, query string, mcpClient *mcp.Clien
 				}
 			}
 			idx = end + 1
+		}
+	}
+
+	// Also match #ID pattern (e.g. "#124554052835 문서 분석해줘")
+	{
+		re := regexp.MustCompile(`#(\d{6,})`)
+		matches := re.FindAllStringSubmatch(query, -1)
+		for _, m := range matches {
+			var id float64
+			for _, c := range m[1] {
+				if c >= '0' && c <= '9' {
+					id = id*10 + float64(c-'0')
+				}
+			}
+			if id > 0 {
+				refLog("ref: trying #%.0f as document", id)
+				// Try document first
+				result, err := mcpClient.CallTool(ctx, "get_document", map[string]interface{}{"id": id})
+				if err == nil {
+					data, _ := json.MarshalIndent(result, "", "  ")
+					if !found {
+						sb.WriteString("\n\n[Referenced Content]\n")
+						found = true
+					}
+					sb.WriteString(fmt.Sprintf("\n## Document #%.0f\n%s\n", id, string(data)))
+					refLog("ref: fetched document #%.0f", id)
+					continue
+				}
+				// Try task
+				result, err = mcpClient.CallTool(ctx, "get_task", map[string]interface{}{"id": id})
+				if err == nil {
+					data, _ := json.MarshalIndent(result, "", "  ")
+					if !found {
+						sb.WriteString("\n\n[Referenced Content]\n")
+						found = true
+					}
+					sb.WriteString(fmt.Sprintf("\n## Task #%.0f\n%s\n", id, string(data)))
+					refLog("ref: fetched task #%.0f", id)
+				}
+			}
 		}
 	}
 
