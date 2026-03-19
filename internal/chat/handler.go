@@ -224,6 +224,12 @@ Intent classification:
 2. If asking about existing content → search and show results
 3. If general question → answer directly without tools
 
+IMPORTANT - Linking format:
+When mentioning documents or tasks from tool results, ALWAYS use this link format:
+- Documents: [@document:ID:title] (e.g. [@document:123:회의록])
+- Tasks: [@task:ID:title] (e.g. [@task:456:버그 수정])
+This creates clickable links in the UI. Never use plain text for referenced items.
+
 Always confirm before creating/modifying content. Respond concisely.`
 
 func (h *Handler) getSystemPrompt(lang string, query string, conversationID int64) string {
