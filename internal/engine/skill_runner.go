@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -137,9 +138,9 @@ func (r *SkillRunner) runPrompt(ctx context.Context, skill *apiclient.WorkflowSk
 
 	logs = append(logs, fmt.Sprintf("model=%s temperature=%.1f max_tokens=%d", model, temperature, maxTokens))
 
-	// Route to appropriate API based on model name
+	// Route to appropriate backend based on model name
 	if strings.HasPrefix(model, "claude") || strings.HasPrefix(model, "anthropic") {
-		return r.callAnthropic(ctx, model, systemPrompt, prompt, temperature, maxTokens, logs)
+		return r.callClaudeCLI(ctx, model, systemPrompt, prompt, maxTokens, logs)
 	}
 	if isLocalModel(model) {
 		return r.callOllama(ctx, model, systemPrompt, prompt, temperature, maxTokens, logs)
@@ -147,10 +148,93 @@ func (r *SkillRunner) runPrompt(ctx context.Context, skill *apiclient.WorkflowSk
 	return r.callOpenAI(ctx, model, systemPrompt, prompt, temperature, maxTokens, logs)
 }
 
-func (r *SkillRunner) callAnthropic(ctx context.Context, model, system, prompt string, temperature float64, maxTokens int, logs []string) (map[string]interface{}, []string, error) {
+// callClaudeCLI uses the Claude Code CLI to call Claude models (no API key needed).
+func (r *SkillRunner) callClaudeCLI(ctx context.Context, model, system, prompt string, maxTokens int, logs []string) (map[string]interface{}, []string, error) {
+	claudePath := findClaudeCLI()
+	if claudePath == "" {
+		logs = append(logs, "claude CLI not found, falling back to Anthropic API")
+		return r.callAnthropicAPI(ctx, model, system, prompt, 0.7, maxTokens, logs)
+	}
+
+	// Build full prompt with system prompt
+	var fullPrompt strings.Builder
+	if system != "" {
+		fullPrompt.WriteString(system)
+		fullPrompt.WriteString("\n\n")
+	}
+	fullPrompt.WriteString(prompt)
+
+	logs = append(logs, fmt.Sprintf("claude CLI: %s model=%s prompt=%d chars", claudePath, model, fullPrompt.Len()))
+
+	args := []string{"-p", fullPrompt.String(), "--model", model, "--output-format", "json"}
+	if maxTokens > 0 {
+		args = append(args, "--max-tokens", fmt.Sprintf("%d", maxTokens))
+	}
+
+	cmd := exec.CommandContext(ctx, claudePath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			logs = append(logs, fmt.Sprintf("claude CLI stderr: %s", truncate(string(ee.Stderr), 500)))
+		}
+		return nil, logs, fmt.Errorf("claude CLI: %w", err)
+	}
+
+	// Parse JSON output: {"type":"result","result":"text content","usage":{...}}
+	var cliResp struct {
+		Type   string `json:"type"`
+		Result string `json:"result"`
+		Usage  struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(output, &cliResp); err != nil {
+		// If not JSON, use raw output as text
+		text := strings.TrimSpace(string(output))
+		logs = append(logs, fmt.Sprintf("claude CLI raw output: %d chars", len(text)))
+		return map[string]interface{}{
+			"text":  text,
+			"model": model + " (CLI)",
+		}, logs, nil
+	}
+
+	logs = append(logs, fmt.Sprintf("claude CLI result: %d chars, in=%d out=%d tokens",
+		len(cliResp.Result), cliResp.Usage.InputTokens, cliResp.Usage.OutputTokens))
+
+	return map[string]interface{}{
+		"text":  cliResp.Result,
+		"model": model + " (CLI)",
+		"usage": map[string]interface{}{
+			"input_tokens":  cliResp.Usage.InputTokens,
+			"output_tokens": cliResp.Usage.OutputTokens,
+		},
+	}, logs, nil
+}
+
+// findClaudeCLI returns the path to claude CLI binary.
+func findClaudeCLI() string {
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+	paths := []string{
+		os.Getenv("HOME") + "/.local/bin/claude",
+		"/usr/local/bin/claude",
+		"/opt/homebrew/bin/claude",
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// callAnthropicAPI calls Anthropic API directly (fallback when CLI not available).
+func (r *SkillRunner) callAnthropicAPI(ctx context.Context, model, system, prompt string, temperature float64, maxTokens int, logs []string) (map[string]interface{}, []string, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
-		return nil, logs, fmt.Errorf("ANTHROPIC_API_KEY not set")
+		return nil, logs, fmt.Errorf("ANTHROPIC_API_KEY not set and claude CLI not found")
 	}
 
 	reqBody := anthropicRequest{
