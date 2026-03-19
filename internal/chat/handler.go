@@ -368,7 +368,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 	claudePath := findClaude()
 	if claudePath != "" {
 		tlog("route: Claude Code CLI (%s)", complexity)
-		resp, err := h.processChatClaudeCLI(ctx, req, claudePath)
+		resp, err := h.processChatClaudeCLI(ctx, req, claudePath, complexity)
 		if err == nil {
 			return resp, nil
 		}
@@ -904,7 +904,7 @@ func findClaude() string {
 }
 
 // processChatClaudeCLI uses Claude Code CLI (for Max subscribers).
-func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayload, claudePath string) (*ChatResponsePayload, error) {
+func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayload, claudePath string, complexity ...string) (*ChatResponsePayload, error) {
 	systemPrompt := h.getSystemPrompt(req.Lang, req.Query, req.ConversationID)
 
 	// Build prompt with system instructions + history + query
@@ -924,11 +924,23 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 	if lang == "ko" {
 		prompt.WriteString("반드시 한국어로 응답하세요.\n\n")
 	}
-	prompt.WriteString("응답 규칙:\n")
-	prompt.WriteString("- 마크다운으로 깔끔하게 포맷팅\n")
-	prompt.WriteString("- 목록은 번호/불릿 사용\n")
-	prompt.WriteString("- 핵심만 간결하게\n")
-	prompt.WriteString("- thinking/추론 과정은 절대 출력하지 마세요\n\n")
+	// Adjust response style based on complexity
+	cplx := "complex"
+	if len(complexity) > 0 && complexity[0] != "" {
+		cplx = complexity[0]
+	}
+	if cplx == "simple" {
+		prompt.WriteString("응답 규칙:\n")
+		prompt.WriteString("- 1-2문장으로 짧고 간결하게\n")
+		prompt.WriteString("- 불필요한 설명 없이 핵심만\n")
+		prompt.WriteString("- thinking/추론 과정은 절대 출력하지 마세요\n\n")
+	} else {
+		prompt.WriteString("응답 규칙:\n")
+		prompt.WriteString("- 마크다운으로 깔끔하게 포맷팅\n")
+		prompt.WriteString("- 목록은 번호/불릿 사용\n")
+		prompt.WriteString("- 핵심만 간결하게\n")
+		prompt.WriteString("- thinking/추론 과정은 절대 출력하지 마세요\n\n")
+	}
 
 	if len(req.History) > 0 {
 		prompt.WriteString("[대화 기록]\n")
