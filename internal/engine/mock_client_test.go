@@ -156,3 +156,8 @@ func (m *mockClient) completeStepCount() int {
 	defer m.mu.Unlock()
 	return len(m.completeStepCalls)
 }
+
+func (m *mockClient) ReportUsage(_ context.Context, _ interface{}) error { return nil }
+func (m *mockClient) GetAgentDetail(_ context.Context, _ int64) (*apiclient.WorkflowAgent, error) {
+	return nil, fmt.Errorf("not implemented")
+}

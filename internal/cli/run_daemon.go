@@ -148,6 +148,7 @@ func RunDaemon(cfg *config.Config) error {
 
 		// Usage tracker — persists to ~/.nlook/usage.json
 		usageTracker := usage.NewTracker(config.ConfigDir() + "/usage.json")
+		reg.UsageTracker = usageTracker
 
 		// Wire chat messages from cloud → chat handler
 		chatHandler := chat.NewHandler(skillRunner, func(msg []byte) {

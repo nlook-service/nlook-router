@@ -6,14 +6,16 @@ import (
 	"time"
 
 	"github.com/nlook-service/nlook-router/internal/apiclient"
+	"github.com/nlook-service/nlook-router/internal/usage"
 )
 
 // Registrar sends register and periodic heartbeats to the server.
 type Registrar struct {
-	Client   apiclient.Interface
-	Interval time.Duration
-	Payload  *apiclient.RegisterPayload
-	stopCh   chan struct{}
+	Client       apiclient.Interface
+	Interval     time.Duration
+	Payload      *apiclient.RegisterPayload
+	UsageTracker *usage.Tracker
+	stopCh       chan struct{}
 }
 
 // NewRegistrar creates a heartbeat registrar.
@@ -56,6 +58,16 @@ func (r *Registrar) loop(ctx context.Context) {
 		case <-ticker.C:
 			if err := r.Client.Heartbeat(ctx, r.Payload); err != nil {
 				log.Printf("heartbeat error: %v", err)
+			}
+			// Flush completed usage buckets to server
+			if r.UsageTracker != nil {
+				if buckets := r.UsageTracker.Flush(); len(buckets) > 0 {
+					if err := r.Client.ReportUsage(ctx, buckets); err != nil {
+						log.Printf("usage report error: %v", err)
+					} else {
+						log.Printf("usage: reported %d hourly bucket(s)", len(buckets))
+					}
+				}
 			}
 		}
 	}

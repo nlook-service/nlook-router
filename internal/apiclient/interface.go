@@ -126,4 +126,7 @@ type Interface interface {
 
 	// Agent operations
 	GetAgentDetail(ctx context.Context, agentID int64) (*WorkflowAgent, error)
+
+	// Usage reporting
+	ReportUsage(ctx context.Context, buckets interface{}) error
 }

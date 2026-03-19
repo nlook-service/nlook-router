@@ -27,3 +27,9 @@ func (c *Client) Heartbeat(ctx context.Context, payload *RegisterPayload) error 
 	}
 	return nil
 }
+
+// ReportUsage sends hourly token usage buckets to the server.
+func (c *Client) ReportUsage(ctx context.Context, buckets interface{}) error {
+	_, err := c.doRequest(ctx, http.MethodPost, "api/routers/usage", buckets)
+	return err
+}
