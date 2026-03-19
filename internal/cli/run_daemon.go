@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -58,9 +59,24 @@ func RunDaemon(cfg *config.Config) error {
 		srv.SetToolsLister(toolsBridge)
 		toolList, err := toolsBridge.ListTools(context.Background())
 		if err != nil {
-			log.Printf("tools bridge list: %v (using built-in tools only)", err)
-		} else {
-			// Merge bridge tools with built-in (bridge tools override by name)
+			// Auto-install tools-bridge dependencies
+			log.Printf("tools bridge: installing dependencies...")
+			reqFile := cfg.ToolsBridgeDir + "/requirements.txt"
+			if _, statErr := os.Stat(reqFile); statErr == nil {
+				installCmd := exec.Command("pip3", "install", "-q", "-r", reqFile)
+				installCmd.Dir = cfg.ToolsBridgeDir
+				if installErr := installCmd.Run(); installErr != nil {
+					log.Printf("tools bridge: pip install failed: %v", installErr)
+				} else {
+					// Retry after install
+					toolList, err = toolsBridge.ListTools(context.Background())
+				}
+			}
+			if err != nil {
+				log.Printf("tools bridge: %v (using built-in tools only)", err)
+			}
+		}
+		if toolList != nil {
 			payload.Tools = tools.MergeTools(payload.Tools, toolList)
 		}
 	}

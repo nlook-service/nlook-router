@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/nlook-service/nlook-router/internal/config"
 	"github.com/nlook-service/nlook-router/internal/ollama"
 	"github.com/spf13/cobra"
 )
@@ -239,6 +241,9 @@ func runAISetup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Step 5: Install tools-bridge dependencies
+	installToolsBridge()
+
 	fmt.Println()
 	fmt.Println("  ✓ Setup complete!")
 	fmt.Println()
@@ -321,6 +326,8 @@ func setupVLLM(ctx context.Context) error {
 	fmt.Println("  │  Chat:    https://nlook.me/ai-search     │")
 	fmt.Println("  │                                          │")
 	fmt.Println("  │  vLLM starts automatically on port 18000 │")
+
+	installToolsBridge()
 	fmt.Println("  ╰──────────────────────────────────────────╯")
 	fmt.Println()
 	return nil
@@ -376,6 +383,41 @@ func runAIRemove(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("✓ Removed %s\n", model)
 	return nil
+}
+
+func installToolsBridge() {
+	// Find tools-bridge directory
+	exePath, _ := os.Executable()
+	dirs := []string{
+		filepath.Join(filepath.Dir(exePath), "tools-bridge"),
+		filepath.Join(filepath.Dir(exePath), "..", "tools-bridge"),
+		"tools-bridge",
+	}
+	// Also check config
+	cfg, _ := config.Load(GetConfigPath())
+	if cfg != nil && cfg.ToolsBridgeDir != "" {
+		dirs = append([]string{cfg.ToolsBridgeDir}, dirs...)
+	}
+
+	for _, dir := range dirs {
+		reqFile := filepath.Join(dir, "requirements.txt")
+		if _, err := os.Stat(reqFile); err == nil {
+			fmt.Println()
+			fmt.Println("  [5/5] Installing tools-bridge dependencies...")
+			cmd := exec.Command("pip3", "install", "-q", "-r", reqFile)
+			cmd.Dir = dir
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				fmt.Printf("  ⚠ tools-bridge install warning: %v\n", err)
+			} else {
+				fmt.Println("  ✓ Tools ready (web_search, code_interpreter, etc.)")
+			}
+			return
+		}
+	}
+	fmt.Println()
+	fmt.Println("  [5/5] Tools-bridge not found, skipping")
 }
 
 func installOllama() error {
