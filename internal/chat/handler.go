@@ -1065,17 +1065,28 @@ func (h *Handler) classifyWithQwen(ctx context.Context, query string, localModel
 		classifyQuery = strings.TrimSpace(classifyQuery[:idx])
 	}
 
-	classifyPrompt := fmt.Sprintf(
-		`Classify this user message as "simple" or "complex".
-Simple: greetings, status checks, listing items, short Q&A, basic CRUD.
-Complex: writing, analysis, comparison, explanation, code generation, document creation.
+	// Short messages (< 15 chars) are always simple
+	if len(classifyQuery) < 15 {
+		if h.usageTracker != nil {
+			h.usageTracker.Record(usage.TokenUsage{
+				Provider: "ollama", Model: localModel, Category: "intent",
+				InputTokens: 0, OutputTokens: 0,
+			})
+		}
+		tlog("classify: short → simple (len=%d)", len(classifyQuery))
+		return "simple"
+	}
 
-Reply with ONLY one word: simple or complex
+	classifyPrompt := fmt.Sprintf(
+		`Classify as "simple" or "complex". Reply ONE word only.
+
+simple examples: 하이, 안녕, 뭐해, 할일 보여줘, 목록 조회, 감사합니다, hi, thanks, show tasks
+complex examples: 블로그 작성해줘, 이 코드 분석해줘, SEO 전략 설명해, 보고서 만들어줘
 
 Message: %s`, classifyQuery)
 
 	result, inTok, outTok, err := ollamaClient.ChatStream(ctx, localModel, "", classifyPrompt,
-		ollama.ChatOptions{MaxTokens: 5, Temperature: 0.0},
+		ollama.ChatOptions{MaxTokens: 3, Temperature: 0.0},
 		nil,
 	)
 	if err != nil {
