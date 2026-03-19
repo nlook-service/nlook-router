@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -87,4 +89,39 @@ func writeSSE(w http.ResponseWriter, flusher http.Flusher, data map[string]inter
 	jsonData, _ := json.Marshal(data)
 	fmt.Fprintf(w, "data: %s\n\n", jsonData)
 	flusher.Flush()
+}
+
+// aiWarmupHandler preloads the Ollama model into memory for fast responses.
+func (s *Server) aiWarmupHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	go WarmupOllama()
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, `{"ok":true}`)
+}
+
+// WarmupOllama sends a minimal request to load the model into GPU memory.
+func WarmupOllama() {
+	client := ollama.NewClient()
+	ctx := context.Background()
+	if !client.IsRunning(ctx) {
+		return
+	}
+	models, _ := client.List(ctx)
+	for _, m := range models {
+		name := strings.ToLower(m.Name)
+		if strings.Contains(name, "embed") || strings.Contains(name, "nomic") {
+			continue
+		}
+		log.Printf("warmup: loading %s into memory", m.Name)
+		// Send minimal request to trigger model load
+		_, _, _, _ = client.ChatStream(ctx, m.Name, "", "hi",
+			ollama.ChatOptions{MaxTokens: 1},
+			nil,
+		)
+		log.Printf("warmup: %s ready", m.Name)
+		return
+	}
 }

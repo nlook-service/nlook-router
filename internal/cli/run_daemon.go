@@ -186,6 +186,9 @@ func RunDaemon(cfg *config.Config) error {
 		wsClient.Start(ctx)
 	}
 
+	// Warmup Ollama model in background for fast fallback
+	go server.WarmupOllama()
+
 	execService.Start(ctx)
 
 	// Scheduler: polls server for schedules and triggers runs on cron
