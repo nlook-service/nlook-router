@@ -84,9 +84,26 @@ func (pb *PromptBuilder) BuildSystemPrompt(lang, query string, conversationID in
 		}
 	}
 
-	// [Language Instruction] — Always at the end
+	// [Language Instruction] — detect actual language from query, override client lang
+	actualLang := lang
+	if actualLang == "" || actualLang == "en" {
+		for _, r := range query {
+			if r >= 0xAC00 && r <= 0xD7AF || r >= 0x3131 && r <= 0x318E {
+				actualLang = "ko"
+				break
+			}
+			if r >= 0x4E00 && r <= 0x9FFF {
+				actualLang = "zh"
+				break
+			}
+			if r >= 0x3040 && r <= 0x30FF {
+				actualLang = "ja"
+				break
+			}
+		}
+	}
 	langInstr := ""
-	switch lang {
+	switch actualLang {
 	case "ko":
 		langInstr = "\n\nCRITICAL: You MUST respond ONLY in Korean (한국어). 절대로 중국어, 영어 등 다른 언어를 사용하지 마세요."
 	case "en":
