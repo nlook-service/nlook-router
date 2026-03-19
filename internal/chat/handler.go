@@ -12,6 +12,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/cache"
 	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/engine"
+	"github.com/nlook-service/nlook-router/internal/gemini"
 	"github.com/nlook-service/nlook-router/internal/llm"
 	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/mcp"
@@ -51,21 +54,25 @@ type ChatRequestPayload struct {
 
 // ChatResponsePayload is sent back to cloud with the AI response.
 type ChatResponsePayload struct {
-	ConversationID int64  `json:"conversation_id"`
-	MessageID      int64  `json:"message_id"`
-	Content        string `json:"content"`
-	Model          string `json:"model"`
-	Role           string `json:"role"`
+	ConversationID int64   `json:"conversation_id"`
+	MessageID      int64   `json:"message_id"`
+	Content        string  `json:"content"`
+	Model          string  `json:"model"`
+	Role           string  `json:"role"`
+	ElapsedMs      int64   `json:"elapsed_ms,omitempty"`
+	TokensUsed     int     `json:"tokens_used,omitempty"`
 }
 
 // ChatDeltaPayload is sent for streaming token-by-token responses.
 type ChatDeltaPayload struct {
-	ConversationID int64  `json:"conversation_id"`
-	MessageID      int64  `json:"message_id"`
-	Delta          string `json:"delta"`
-	Done           bool   `json:"done"`
-	FullContent    string `json:"full_content,omitempty"`
-	Model          string `json:"model,omitempty"`
+	ConversationID int64   `json:"conversation_id"`
+	MessageID      int64   `json:"message_id"`
+	Delta          string  `json:"delta"`
+	Done           bool    `json:"done"`
+	FullContent    string  `json:"full_content,omitempty"`
+	Model          string  `json:"model,omitempty"`
+	ElapsedMs      int64   `json:"elapsed_ms,omitempty"`
+	TokensUsed     int     `json:"tokens_used,omitempty"`
 }
 
 // ChatErrorPayload is sent when chat processing fails.
@@ -176,6 +183,8 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 	go func() {
 		startTime := time.Now()
 		ctx := context.WithValue(context.Background(), "trace_id", traceID)
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
 		resp, err := h.processChat(ctx, &req)
 		elapsed := time.Since(startTime)
 		if err != nil {
@@ -188,7 +197,11 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 			})
 			return
 		}
-		log.Printf("[%s] ✓ DONE %s model=%s len=%d", traceID, elapsed.Round(time.Millisecond), resp.Model, len(resp.Content))
+		resp.ElapsedMs = elapsed.Milliseconds()
+		if resp.TokensUsed == 0 {
+			resp.TokensUsed = len(resp.Content) / 4 // rough estimate
+		}
+		log.Printf("[%s] ✓ DONE %s model=%s len=%d tokens≈%d", traceID, elapsed.Round(time.Millisecond), resp.Model, len(resp.Content), resp.TokensUsed)
 		log.Printf("[%s] ═══ CHAT END ═════════════════════════════", traceID)
 		h.sendResponse("chat:response", resp)
 	}()
@@ -249,10 +262,9 @@ const recentMessageCount = 6 // Keep last N messages as full context
 func (h *Handler) getOllamaHistory(req *ChatRequestPayload) []ollama.MessageEntry {
 	history := req.History
 	if len(history) <= recentMessageCount {
-		// Short conversation — return all messages as-is
 		entries := make([]ollama.MessageEntry, 0, len(history))
 		for _, m := range history {
-			entries = append(entries, ollama.MessageEntry{Role: m.Role, Content: m.Content})
+			entries = append(entries, ollama.MessageEntry{Role: m.Role, Content: stripThinking(m.Content)})
 		}
 		return entries
 	}
@@ -340,46 +352,53 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		} // end !hasRefs
 	}
 
-	// 1. vLLM (우선) — 고성능 배치 처리
-	if h.llmEngine != nil && h.llmEngine.Type() == llm.EngineVLLM && h.llmEngine.IsRunning(ctx) {
-		if model == "" {
-			model = h.llmEngine.Model()
-		}
-		return h.processChatVLLM(ctx, req, model)
-	}
+	// Hybrid routing with cascading fallback:
+	// 1. Simple queries → local Ollama (fast, free)
+	// 2. Claude Code CLI — primary reasoning (Max subscribers, free)
+	// 3. Gemini Flash Lite — fallback reasoning (cheap)
+	// 4. All fail → local Ollama (last resort)
 
-	// 2. Ollama — 로컬 모델
-	if model == "" {
-		ollamaClient := ollama.NewClient()
-		if ollamaClient.IsRunning(ctx) {
-			models, _ := ollamaClient.List(ctx)
-			for _, m := range models {
-				name := strings.ToLower(m.Name)
-				if strings.Contains(name, "embed") || strings.Contains(name, "nomic") {
-					continue
-				}
-				model = m.Name
-				tlog("model: using %s", model)
-				break
-			}
+	simple := isSimpleQuery(req.Query)
+
+	// 1. Simple → local Ollama
+	if simple {
+		localModel := h.findLocalModel(ctx, model)
+		if localModel != "" {
+			tlog("route: local %s (simple)", localModel)
+			return h.processChatOllama(ctx, req, localModel)
 		}
 	}
 
-	// 3. Claude API 폴백
-	if model == "" {
-		model = "claude-sonnet-4-20250514"
+	// 2. Claude Code CLI — primary reasoning
+	claudePath := findClaude()
+	if claudePath != "" {
+		tlog("route: Claude Code CLI")
+		resp, err := h.processChatClaudeCLI(ctx, req, claudePath)
+		if err == nil {
+			return resp, nil
+		}
+		tlog("route: Claude CLI failed: %v, trying Gemini", err)
 	}
 
-	if isLocalModel(model) {
-		return h.processChatOllama(ctx, req, model)
+	// 3. Gemini Cloud — fallback reasoning
+	geminiClient := gemini.NewClient()
+	if geminiClient != nil {
+		tlog("route: Gemini Cloud (%s)", geminiClient.Model())
+		resp, err := h.processChatGemini(ctx, req, geminiClient)
+		if err == nil {
+			return resp, nil
+		}
+		tlog("route: Gemini failed: %v", err)
 	}
-	if h.mcpClient != nil && isClaudeModel(model) {
-		return h.processChatWithTools(ctx, req, model)
+
+	// 4. Local Ollama — last resort
+	localModel := h.findLocalModel(ctx, model)
+	if localModel != "" {
+		tlog("route: local %s (last resort)", localModel)
+		return h.processChatOllama(ctx, req, localModel)
 	}
-	if isClaudeModel(model) {
-		return h.processChatStream(ctx, req, model)
-	}
-	return h.processChatSimple(ctx, req, model)
+
+	return nil, fmt.Errorf("no LLM available: configure gemini_api_key, ANTHROPIC_API_KEY, or install Ollama")
 }
 
 // processChatWithTools uses Anthropic API with tool_use for MCP integration.
@@ -606,6 +625,8 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 	if err != nil {
 		return nil, fmt.Errorf("ollama chat: %w", err)
 	}
+
+	fullText = stripThinking(fullText)
 
 	h.sendResponse("chat:delta", ChatDeltaPayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
@@ -853,6 +874,116 @@ func (h *Handler) sendResponse(msgType string, payload interface{}) {
 	h.sendWS(msg)
 }
 
+// stripThinking removes <think>...</think> blocks and any stray tags from LLM output.
+var thinkingRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
+var strayThinkTagRe = regexp.MustCompile(`</?think>`)
+
+func stripThinking(s string) string {
+	s = thinkingRe.ReplaceAllString(s, "")
+	s = strayThinkTagRe.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
+
+// findClaude returns the path to claude CLI, checking common locations.
+func findClaude() string {
+	// Check PATH first
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+	// Check common install locations
+	paths := []string{
+		os.Getenv("HOME") + "/.local/bin/claude",
+		"/usr/local/bin/claude",
+		"/opt/homebrew/bin/claude",
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// processChatClaudeCLI uses Claude Code CLI (for Max subscribers).
+func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayload, claudePath string) (*ChatResponsePayload, error) {
+	systemPrompt := h.getSystemPrompt(req.Lang, req.Query, req.ConversationID)
+
+	// Build prompt with system instructions + history + query
+	var prompt strings.Builder
+	prompt.WriteString(systemPrompt + "\n\n")
+	prompt.WriteString("응답 규칙:\n")
+	prompt.WriteString("- 마크다운으로 깔끔하게 포맷팅\n")
+	prompt.WriteString("- 목록은 번호/불릿 사용\n")
+	prompt.WriteString("- 핵심만 간결하게\n")
+	prompt.WriteString("- thinking/추론 과정은 절대 출력하지 마세요\n\n")
+
+	if len(req.History) > 0 {
+		prompt.WriteString("[대화 기록]\n")
+		for _, m := range req.History {
+			role := "사용자"
+			if m.Role == "assistant" {
+				role = "AI"
+			}
+			content := m.Content
+			if len(content) > 200 {
+				content = content[:200] + "..."
+			}
+			prompt.WriteString(role + ": " + content + "\n")
+		}
+		prompt.WriteString("[대화 기록 끝]\n\n")
+	}
+	prompt.WriteString(req.Query)
+
+	cmd := exec.CommandContext(ctx, claudePath, "-p", prompt.String(), "--model", "claude-haiku-4-5-20251001", "--output-format", "text")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("claude CLI: %w", err)
+	}
+
+	content := stripThinking(strings.TrimSpace(string(output)))
+
+	model := "claude-haiku-4-5 (CLI)"
+
+	// Send as single delta (no streaming from CLI)
+	h.sendResponse("chat:delta", ChatDeltaPayload{
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Delta: content, Done: false,
+	})
+	h.sendResponse("chat:delta", ChatDeltaPayload{
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Delta: "", Done: true, FullContent: content, Model: model,
+	})
+
+	return &ChatResponsePayload{
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Content: content, Model: model, Role: "assistant",
+	}, nil
+}
+
+// findLocalModel returns a usable local model name, or empty string.
+func (h *Handler) findLocalModel(ctx context.Context, model string) string {
+	if model != "" && isLocalModel(model) {
+		return model
+	}
+	// Try vLLM
+	if h.llmEngine != nil && h.llmEngine.Type() == llm.EngineVLLM && h.llmEngine.IsRunning(ctx) {
+		return h.llmEngine.Model()
+	}
+	// Try Ollama
+	ollamaClient := ollama.NewClient()
+	if ollamaClient.IsRunning(ctx) {
+		models, _ := ollamaClient.List(ctx)
+		for _, m := range models {
+			name := strings.ToLower(m.Name)
+			if strings.Contains(name, "embed") || strings.Contains(name, "nomic") {
+				continue
+			}
+			return m.Name
+		}
+	}
+	return ""
+}
+
 func isClaudeModel(model string) bool {
 	return strings.HasPrefix(model, "claude") || strings.HasPrefix(model, "anthropic")
 }
@@ -886,4 +1017,66 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// isSimpleQuery returns true for trivial queries that local model can handle.
+// Everything else goes to Gemini Cloud for better reasoning.
+func isSimpleQuery(query string) bool {
+	// If tool results are attached, needs cloud reasoning
+	if strings.Contains(query, "[Tool Result:") {
+		return false
+	}
+	// Short greetings / simple status
+	clean := strings.TrimSpace(query)
+	if len(clean) < 15 {
+		return true
+	}
+	simplePatterns := []string{
+		"안녕", "하이", "헬로", "hello", "hi ", "hey",
+		"ㅎㅇ", "ㅎㅎ", "ㅋㅋ", "감사", "고마워", "thanks",
+		"네", "응", "아니", "ok", "yes", "no",
+	}
+	lower := strings.ToLower(clean)
+	for _, p := range simplePatterns {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// processChatGemini uses Gemini Cloud API with streaming.
+func (h *Handler) processChatGemini(ctx context.Context, req *ChatRequestPayload, client *gemini.Client) (*ChatResponsePayload, error) {
+	systemPrompt := h.getSystemPrompt(req.Lang, req.Query, req.ConversationID)
+
+	messages := make([]map[string]string, 0)
+	for _, m := range req.History {
+		messages = append(messages, map[string]string{"role": m.Role, "content": m.Content})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": req.Query})
+
+	fullText, err := client.ChatStream(ctx, systemPrompt, messages,
+		func(text string) {
+			h.sendResponse("chat:delta", ChatDeltaPayload{
+				ConversationID: req.ConversationID,
+				MessageID:      req.MessageID,
+				Delta:          text,
+				Done:           false,
+			})
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("gemini chat: %w", err)
+	}
+
+	model := client.Model()
+	h.sendResponse("chat:delta", ChatDeltaPayload{
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Delta: "", Done: true, FullContent: fullText, Model: model,
+	})
+
+	return &ChatResponsePayload{
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Content: fullText, Model: model, Role: "assistant",
+	}, nil
 }

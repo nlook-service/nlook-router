@@ -43,6 +43,9 @@ var selfUpdateCmd = &cobra.Command{
 // If a new version is found, automatically downloads and replaces the binary,
 // then prompts the user to restart.
 func CheckForUpdate() {
+	if os.Getenv("NLOOK_NO_UPDATE") != "" {
+		return
+	}
 	go func() {
 		release, err := getLatestRelease()
 		if err != nil || release == nil {

@@ -170,6 +170,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model, system, prompt string
 		"messages": messages,
 		"stream":   false,
 		"tools":    tools,
+		"think":    false,
 	}
 
 	body, _ := json.Marshal(reqBody)
@@ -245,6 +246,7 @@ func (c *Client) ChatWithToolResults(ctx context.Context, model, system, prompt 
 		"model":    model,
 		"messages": messages,
 		"stream":   true,
+		"think":    false,
 	}
 
 	body, _ := json.Marshal(reqBody)
@@ -336,6 +338,7 @@ func (c *Client) ChatStream(ctx context.Context, model, system, prompt string, o
 		"messages": messages,
 		"stream":   true,
 		"options":  options,
+		"think":    false,
 	}
 
 	body, _ := json.Marshal(reqBody)

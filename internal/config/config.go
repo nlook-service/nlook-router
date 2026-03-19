@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -17,6 +18,16 @@ type Config struct {
 
 	// ToolsBridgeDir is the path to the tools-bridge directory (for CLI bridge). If empty, tools list/execute are not available.
 	ToolsBridgeDir string `yaml:"tools_bridge_dir,omitempty"`
+
+	// LLM engine settings (read from config.yaml, exported as env vars for llm.NewEngine)
+	LLMEngine   string `yaml:"llm_engine,omitempty"`   // "vllm" or "ollama"
+	AIModel     string `yaml:"ai_model,omitempty"`     // e.g. "qwen3:4b"
+	VLLMBaseURL string `yaml:"vllm_base_url,omitempty"` // e.g. "http://localhost:18000"
+
+	// Cloud LLM fallback for complex tasks (SEO, document generation, analysis)
+	GeminiAPIKey    string `yaml:"gemini_api_key,omitempty"`    // Gemini API key
+	CloudModel      string `yaml:"cloud_model,omitempty"`       // e.g. "gemini-2.0-flash-lite"
+	AnthropicAPIKey string `yaml:"anthropic_api_key,omitempty"` // Claude Haiku fallback
 }
 
 // Default returns a config with default values.
@@ -47,6 +58,32 @@ func Load(path string) (*Config, error) {
 		c.Port = Default().Port
 	}
 	return &c, nil
+}
+
+// ApplyLLMEnv exports LLM-related config fields as environment variables
+// so that llm.NewEngine() can pick them up.
+func (c *Config) ApplyLLMEnv() {
+	log.Printf("config: ApplyLLMEnv called (engine=%q model=%q vllm_url=%q)", c.LLMEngine, c.AIModel, c.VLLMBaseURL)
+	if c.LLMEngine != "" && os.Getenv("NLOOK_LLM_ENGINE") == "" {
+		os.Setenv("NLOOK_LLM_ENGINE", c.LLMEngine)
+	}
+	if c.AIModel != "" && os.Getenv("NLOOK_AI_MODEL") == "" {
+		os.Setenv("NLOOK_AI_MODEL", c.AIModel)
+	}
+	if c.VLLMBaseURL != "" && os.Getenv("VLLM_BASE_URL") == "" {
+		os.Setenv("VLLM_BASE_URL", c.VLLMBaseURL)
+	}
+	if c.GeminiAPIKey != "" && os.Getenv("GEMINI_API_KEY") == "" {
+		os.Setenv("GEMINI_API_KEY", c.GeminiAPIKey)
+	}
+	if c.CloudModel != "" && os.Getenv("NLOOK_CLOUD_MODEL") == "" {
+		os.Setenv("NLOOK_CLOUD_MODEL", c.CloudModel)
+	}
+	if c.AnthropicAPIKey != "" && os.Getenv("ANTHROPIC_API_KEY") == "" {
+		os.Setenv("ANTHROPIC_API_KEY", c.AnthropicAPIKey)
+	}
+	log.Printf("config: env after apply: VLLM_BASE_URL=%q NLOOK_LLM_ENGINE=%q NLOOK_AI_MODEL=%q GEMINI=%v",
+		os.Getenv("VLLM_BASE_URL"), os.Getenv("NLOOK_LLM_ENGINE"), os.Getenv("NLOOK_AI_MODEL"), os.Getenv("GEMINI_API_KEY") != "")
 }
 
 // Save writes config to path. Creates parent directory if needed.

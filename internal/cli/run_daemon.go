@@ -80,6 +80,9 @@ func RunDaemon(cfg *config.Config) error {
 			payload.Tools = tools.MergeTools(payload.Tools, toolList)
 		}
 	}
+	// Apply LLM config from config.yaml as env vars (before any engine init)
+	cfg.ApplyLLMEnv()
+
 	reg := heartbeat.NewRegistrar(client, 0, payload)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

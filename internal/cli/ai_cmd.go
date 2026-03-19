@@ -16,6 +16,7 @@ import (
 )
 
 var modelFlag string
+var vllmModelFlag string
 var engineFlag string
 
 var aiCmd = &cobra.Command{
@@ -51,7 +52,7 @@ var aiSetupVLLMCmd = &cobra.Command{
 func init() {
 	aiSetupCmd.Flags().StringVar(&modelFlag, "model", "", "model to download (auto-detected by engine)")
 	aiSetupCmd.Flags().StringVar(&engineFlag, "engine", "auto", "LLM engine: auto, vllm, ollama")
-	aiSetupVLLMCmd.Flags().StringVar(&modelFlag, "model", "Qwen/Qwen3-8B", "HuggingFace model for vLLM")
+	aiSetupVLLMCmd.Flags().StringVar(&vllmModelFlag, "model", "Qwen/Qwen3-8B", "HuggingFace model for vLLM")
 	aiCmd.AddCommand(aiSetupCmd, aiSetupVLLMCmd, aiListCmd, aiRemoveCmd)
 	rootCmd.AddCommand(aiCmd)
 }
@@ -92,7 +93,7 @@ func runAISetupVLLM(cmd *cobra.Command, args []string) error {
 	fmt.Println("  ✓ Setup complete!")
 	fmt.Println()
 	fmt.Println("  ╭──────────────────────────────────────────╮")
-	fmt.Printf("  │  Model:   %-31s │\n", modelFlag)
+	fmt.Printf("  │  Model:   %-31s │\n", vllmModelFlag)
 	fmt.Println("  │  Engine:  vLLM                           │")
 	fmt.Println("  │                                          │")
 	fmt.Println("  │  Start:                                  │")
@@ -101,7 +102,7 @@ func runAISetupVLLM(cmd *cobra.Command, args []string) error {
 	fmt.Println("  │                                          │")
 	fmt.Println("  │  Or set in ~/.nlook/config.yaml:         │")
 	fmt.Println("  │    llm_engine: vllm                      │")
-	fmt.Printf("  │    ai_model: %-28s │\n", modelFlag)
+	fmt.Printf("  │    ai_model: %-28s │\n", vllmModelFlag)
 	fmt.Println("  ╰──────────────────────────────────────────╯")
 	fmt.Println()
 	return nil
@@ -117,16 +118,11 @@ func runAISetup(cmd *cobra.Command, args []string) error {
 
 	ctx := context.Background()
 
-	// Auto-detect engine: prefer vLLM if Python available
+	// Auto-detect engine: Ollama for desktop, vLLM only when explicitly requested
 	engine := engineFlag
 	if engine == "auto" {
-		if _, err := exec.LookPath("python3"); err == nil {
-			engine = "vllm"
-			fmt.Println("  Python detected → using vLLM (recommended)")
-		} else {
-			engine = "ollama"
-			fmt.Println("  Python not found → using Ollama")
-		}
+		engine = "ollama"
+		fmt.Println("  Engine: Ollama (optimized for local devices)")
 		fmt.Println()
 	}
 
@@ -134,9 +130,9 @@ func runAISetup(cmd *cobra.Command, args []string) error {
 		return setupVLLM(ctx)
 	}
 
-	// Ollama setup
+	// Ollama setup — default to 4b for fast responses (~5s on Apple Silicon)
 	if modelFlag == "" {
-		modelFlag = "qwen3:8b"
+		modelFlag = "qwen3:4b"
 	}
 
 	client := ollama.NewClient()
@@ -241,7 +237,21 @@ func runAISetup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Step 5: Install tools-bridge dependencies
+	// Step 5: Save config
+	cfgPath := GetConfigPath()
+	cfg, _ := config.Load(cfgPath)
+	if cfg != nil {
+		cfg.LLMEngine = "ollama"
+		cfg.AIModel = modelFlag
+		cfg.VLLMBaseURL = ""
+		if err := cfg.Save(cfgPath); err != nil {
+			fmt.Printf("  ⚠ Failed to save config: %v\n", err)
+		} else {
+			fmt.Println("  ✓ Config saved to " + cfgPath)
+		}
+	}
+
+	// Step 6: Install tools-bridge dependencies
 	installToolsBridge()
 
 	fmt.Println()
@@ -258,7 +268,7 @@ func runAISetup(cmd *cobra.Command, args []string) error {
 }
 
 func setupVLLM(ctx context.Context) error {
-	model := modelFlag
+	model := vllmModelFlag
 	if model == "" {
 		model = "Qwen/Qwen3-8B"
 	}
