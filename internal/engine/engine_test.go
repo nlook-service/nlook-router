@@ -79,7 +79,7 @@ func TestWorkflowEngine_Execute_emptyNodes(t *testing.T) {
 	}
 }
 
-func TestWorkflowEngine_Execute_noStartNode(t *testing.T) {
+func TestWorkflowEngine_Execute_noStartNode_infersFromInDegree(t *testing.T) {
 	mc := newMockClient()
 	eng := buildEngine(mc)
 
@@ -91,9 +91,10 @@ func TestWorkflowEngine_Execute_noStartNode(t *testing.T) {
 	}
 	run := simpleRun(3)
 
+	// ParseDAG infers start from in-degree 0 node when no explicit start exists
 	_, err := eng.Execute(context.Background(), detail, run)
-	if err == nil {
-		t.Fatal("expected error for missing start node, got nil")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

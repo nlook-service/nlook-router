@@ -63,7 +63,7 @@ func TestParseDAG_linearChain(t *testing.T) {
 	}
 }
 
-func TestParseDAG_missingStartNode(t *testing.T) {
+func TestParseDAG_missingStartNode_usesInDegreeZero(t *testing.T) {
 	nodes := []apiclient.WorkflowNode{
 		makeNode("step-1", "step"),
 		makeNode("end-1", "end"),
@@ -72,9 +72,13 @@ func TestParseDAG_missingStartNode(t *testing.T) {
 		makeEdge("step-1", "end-1"),
 	}
 
-	_, err := ParseDAG(nodes, edges)
-	if err == nil {
-		t.Fatal("expected error for missing start node, got nil")
+	dag, err := ParseDAG(nodes, edges)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// When no explicit start node, ParseDAG picks a node with in-degree 0
+	if dag.Start == nil {
+		t.Fatal("expected a start node to be inferred")
 	}
 }
 
