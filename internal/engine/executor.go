@@ -171,7 +171,16 @@ func (e *StepExecutor) executeSkillNode(ctx context.Context, node *apiclient.Wor
 		}
 	}
 
-	output, logs, err := e.skillRunner.RunSkill(ctx, skill, nil, input)
+	// Resolve agent if agent_id is set in node data
+	var agent *apiclient.WorkflowAgent
+	agentID := extractInt64(node.Data, "agent_id")
+	if agentID != 0 {
+		if a, ok := e.agents[agentID]; ok {
+			agent = a
+		}
+	}
+
+	output, logs, err := e.skillRunner.RunSkill(ctx, skill, agent, input)
 	if err != nil {
 		return &StepResult{
 			Status:   "failed",
