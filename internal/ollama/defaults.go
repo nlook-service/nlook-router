@@ -22,6 +22,7 @@ var modelFamilyDefaults = map[string]ModelDefaults{
 	"llama3.2":      {Temperature: 1.5, TopP: 0.95, TopK: -1, RepetitionPenalty: 1.0, NumPredict: 4096},
 	"gemma":         {Temperature: 1.0, TopP: 0.95, TopK: 64, RepetitionPenalty: 1.0, NumPredict: 4096},
 	"gemma2":        {Temperature: 1.0, TopP: 0.95, TopK: 64, RepetitionPenalty: 1.0, NumPredict: 4096},
+	"gemma3":        {Temperature: 0.8, TopP: 0.95, TopK: 64, RepetitionPenalty: 1.0, NumPredict: 4096},
 	"mistral":       {Temperature: 0.7, TopP: 0.95, TopK: -1, RepetitionPenalty: 1.0, NumPredict: 4096},
 	"deepseek":      {Temperature: 0.6, TopP: 0.95, TopK: -1, RepetitionPenalty: 1.0, NumPredict: 4096},
 	"deepseek-r1":   {Temperature: 0.6, TopP: 0.95, TopK: -1, RepetitionPenalty: 1.0, NumPredict: 4096},
@@ -41,7 +42,7 @@ func GetModelDefaults(model string) ModelDefaults {
 	for _, prefix := range []string{
 		"qwen3.5", "qwen3", "qwen2.5",
 		"llama3.2", "llama3.1", "llama3",
-		"gemma2", "gemma",
+		"gemma3", "gemma2", "gemma",
 		"deepseek-r1", "deepseek",
 		"mistral", "phi",
 	} {

@@ -6,4 +6,5 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/tools", s.toolsHandler)
 	s.mux.HandleFunc("/ai-search", s.aiSearchHandler)
 	s.mux.HandleFunc("/ai-warmup", s.aiWarmupHandler)
+	s.mux.HandleFunc("/status/model", s.modelStatusHandler)
 }

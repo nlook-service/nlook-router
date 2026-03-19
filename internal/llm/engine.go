@@ -59,7 +59,7 @@ func NewEngine() *Engine {
 				e.baseURL = "http://localhost:18000"
 				e.model = os.Getenv("NLOOK_AI_MODEL")
 				if e.model == "" {
-					e.model = "Qwen/Qwen3-8B"
+					e.model = "gemma3:4b"
 				}
 				log.Printf("llm: vLLM detected, using as default engine")
 				return e
@@ -105,7 +105,7 @@ func (e *Engine) StartManaged(ctx context.Context) error {
 
 	model := e.model
 	if model == "" {
-		model = "Qwen/Qwen3-8B"
+		model = "gemma3:4b"
 	}
 
 	log.Printf("llm: starting vLLM with model %s on %s", model, e.baseURL)

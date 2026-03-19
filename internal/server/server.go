@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nlook-service/nlook-router/internal/llm"
 	"github.com/nlook-service/nlook-router/internal/tools"
 )
 
@@ -15,6 +16,7 @@ type Server struct {
 	httpServer  *http.Server
 	status      *Status
 	toolsLister tools.Lister
+	llmEngine   *llm.Engine
 }
 
 // Status holds runtime status for GET /status.
@@ -41,6 +43,11 @@ func New(addr string, status *Status) *Server {
 // SetToolsLister sets the lister for GET /tools. If not set, /tools returns 503.
 func (s *Server) SetToolsLister(l tools.Lister) {
 	s.toolsLister = l
+}
+
+// SetLLMEngine sets the LLM engine for model status queries.
+func (s *Server) SetLLMEngine(e *llm.Engine) {
+	s.llmEngine = e
 }
 
 // ListenAndServe blocks until the server is stopped.

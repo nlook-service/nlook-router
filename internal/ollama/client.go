@@ -80,6 +80,55 @@ func (c *Client) List(ctx context.Context) ([]ModelInfo, error) {
 	return result.Models, nil
 }
 
+// ModelDetail holds detailed model information from Ollama /api/show.
+type ModelDetail struct {
+	Name            string `json:"name"`
+	ParameterSize   string `json:"parameter_size"`
+	QuantizationLevel string `json:"quantization_level"`
+	Format          string `json:"format"`
+	Family          string `json:"family"`
+	Size            int64  `json:"size"`
+}
+
+// Show returns detailed information about a specific model.
+func (c *Client) Show(ctx context.Context, model string) (*ModelDetail, error) {
+	body, _ := json.Marshal(map[string]string{"name": model})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/show", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("show model: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("show model: status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Details struct {
+			ParameterSize     string `json:"parameter_size"`
+			QuantizationLevel string `json:"quantization_level"`
+			Format            string `json:"format"`
+			Family            string `json:"family"`
+		} `json:"details"`
+		Size int64 `json:"size"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &ModelDetail{
+		Name:              model,
+		ParameterSize:     result.Details.ParameterSize,
+		QuantizationLevel: result.Details.QuantizationLevel,
+		Format:            result.Details.Format,
+		Family:            result.Details.Family,
+		Size:              result.Size,
+	}, nil
+}
+
 // Pull downloads a model with progress callback.
 func (c *Client) Pull(ctx context.Context, model string, progress func(status string, completed, total int64)) error {
 	body, _ := json.Marshal(map[string]interface{}{"name": model, "stream": true})

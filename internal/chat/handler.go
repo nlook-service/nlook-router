@@ -1274,17 +1274,24 @@ func (h *Handler) findLocalModel(ctx context.Context, model string) string {
 	if h.llmEngine != nil && h.llmEngine.Type() == llm.EngineVLLM && h.llmEngine.IsRunning(ctx) {
 		return h.llmEngine.Model()
 	}
-	// Try Ollama
+	// Try Ollama (prefer gemma3)
 	ollamaClient := ollama.NewClient()
 	if ollamaClient.IsRunning(ctx) {
 		models, _ := ollamaClient.List(ctx)
+		var fallback string
 		for _, m := range models {
 			name := strings.ToLower(m.Name)
 			if strings.Contains(name, "embed") || strings.Contains(name, "nomic") {
 				continue
 			}
-			return m.Name
+			if strings.Contains(name, "gemma3") || strings.Contains(name, "gemma-3") {
+				return m.Name
+			}
+			if fallback == "" {
+				fallback = m.Name
+			}
 		}
+		return fallback
 	}
 	return ""
 }
