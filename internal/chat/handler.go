@@ -878,6 +878,7 @@ func (h *Handler) sendResponse(msgType string, payload interface{}) {
 		log.Printf("chat: marshal ws message error: %v", err)
 		return
 	}
+	log.Printf("ws_send: type=%s len=%d", msgType, len(msg))
 	h.sendWS(msg)
 }
 
@@ -918,6 +919,20 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 	// Build prompt with system instructions + history + query
 	var prompt strings.Builder
 	prompt.WriteString(systemPrompt + "\n\n")
+	// Language instruction
+	lang := req.Lang
+	if lang == "" || lang == "en" {
+		// Detect from query
+		for _, r := range req.Query {
+			if r >= 0xAC00 && r <= 0xD7AF {
+				lang = "ko"
+				break
+			}
+		}
+	}
+	if lang == "ko" {
+		prompt.WriteString("반드시 한국어로 응답하세요.\n\n")
+	}
 	prompt.WriteString("응답 규칙:\n")
 	prompt.WriteString("- 마크다운으로 깔끔하게 포맷팅\n")
 	prompt.WriteString("- 목록은 번호/불릿 사용\n")
