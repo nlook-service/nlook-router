@@ -1004,12 +1004,28 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 				if c.Type == "text" && c.Text != "" {
 					if len(c.Text) > len(lastText) {
 						delta := c.Text[len(lastText):]
-						h.sendResponse("chat:delta", ChatDeltaPayload{
-							ConversationID: req.ConversationID,
-							MessageID:      req.MessageID,
-							Delta:          delta,
-							Done:           false,
-						})
+						// Simulate streaming: send in small chunks
+						for i := 0; i < len(delta); {
+							// Send ~20-40 chars per chunk (word boundary)
+							end := i + 30
+							if end > len(delta) {
+								end = len(delta)
+							} else {
+								// Find next space/newline for clean break
+								for end < len(delta) && delta[end] != ' ' && delta[end] != '\n' {
+									end++
+								}
+							}
+							chunk := delta[i:end]
+							h.sendResponse("chat:delta", ChatDeltaPayload{
+								ConversationID: req.ConversationID,
+								MessageID:      req.MessageID,
+								Delta:          chunk,
+								Done:           false,
+							})
+							i = end
+							time.Sleep(30 * time.Millisecond)
+						}
 						lastText = c.Text
 					}
 				}
