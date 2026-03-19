@@ -355,9 +355,9 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		} // end !hasRefs
 	}
 
-	// qwen classifies intent (tracked in usage stats), all responses via Claude
+	// qwen classifies every query (tracked in usage stats), all responses via Claude
 	localModel := h.findLocalModel(ctx, model)
-	complexity := h.classifyComplexity(ctx, req.Query, localModel, tlog)
+	complexity := h.classifyWithQwen(ctx, req.Query, localModel, tlog)
 
 	switch complexity {
 	default:
@@ -1035,6 +1035,56 @@ func (h *Handler) processChatOllamaSimple(ctx context.Context, req *ChatRequestP
 		Content: fullText, Model: model, Role: "assistant",
 		TokensUsed: inTok + outTok, ElapsedMs: time.Since(streamStart).Milliseconds(),
 	}, nil
+}
+
+// classifyWithQwen always calls qwen for classification (for usage tracking).
+func (h *Handler) classifyWithQwen(ctx context.Context, query string, localModel string, tlog func(string, ...interface{})) string {
+	if localModel == "" {
+		return "complex" // no local model, default to complex
+	}
+
+	ollamaClient := ollama.NewClient()
+	if !ollamaClient.IsRunning(ctx) {
+		return "complex"
+	}
+
+	classifyQuery := strings.TrimSpace(query)
+	if idx := strings.Index(classifyQuery, "[Tool Result:"); idx >= 0 {
+		classifyQuery = strings.TrimSpace(classifyQuery[:idx])
+	}
+
+	classifyPrompt := fmt.Sprintf(
+		`Classify this user message as "simple" or "complex".
+Simple: greetings, status checks, listing items, short Q&A, basic CRUD.
+Complex: writing, analysis, comparison, explanation, code generation, document creation.
+
+Reply with ONLY one word: simple or complex
+
+Message: %s`, classifyQuery)
+
+	result, inTok, outTok, err := ollamaClient.ChatStream(ctx, localModel, "", classifyPrompt,
+		ollama.ChatOptions{MaxTokens: 5, Temperature: 0.0},
+		nil,
+	)
+	if err != nil {
+		tlog("classify: qwen error: %v", err)
+		return "complex"
+	}
+
+	if h.usageTracker != nil {
+		h.usageTracker.Record(usage.TokenUsage{
+			Provider: "ollama", Model: localModel, Category: "intent",
+			InputTokens: inTok, OutputTokens: outTok,
+		})
+	}
+
+	result = strings.TrimSpace(strings.ToLower(result))
+	if strings.Contains(result, "simple") {
+		tlog("classify: qwen → simple (in=%d out=%d)", inTok, outTok)
+		return "simple"
+	}
+	tlog("classify: qwen → complex (in=%d out=%d)", inTok, outTok)
+	return "complex"
 }
 
 // classifyComplexity determines if a query is "simple" or "complex".
