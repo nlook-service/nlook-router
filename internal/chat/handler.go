@@ -591,6 +591,7 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 				},
 			)
 			if err == nil {
+				fullText = stripThinking(fullText)
 				if h.usageTracker != nil {
 					h.usageTracker.Record(usage.TokenUsage{
 						UserID: req.UserID, Provider: "ollama", Model: model, Category: "chat",
@@ -613,13 +614,14 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 
 		// If tool calling returned text without tools, use it
 		if err == nil && resp.Content != "" {
+			cleaned := stripThinking(resp.Content)
 			h.sendResponse("chat:response", ChatResponsePayload{
 				ConversationID: req.ConversationID, MessageID: req.MessageID,
-				Content: resp.Content, Model: model, Role: "assistant",
+				Content: cleaned, Model: model, Role: "assistant",
 			})
 			return &ChatResponsePayload{
 				ConversationID: req.ConversationID, MessageID: req.MessageID,
-				Content: resp.Content, Model: model, Role: "assistant",
+				Content: cleaned, Model: model, Role: "assistant",
 			}, nil
 		}
 	}
