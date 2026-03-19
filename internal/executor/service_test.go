@@ -85,6 +85,12 @@ func (m *mockClient) CreateRun(ctx context.Context, workflowID int64, input map[
 func (m *mockClient) CreateRunWithParams(ctx context.Context, params apiclient.CreateRunParams) (*apiclient.RunInfo, error) {
 	return nil, nil
 }
+func (m *mockClient) GetAgentDetail(ctx context.Context, agentID int64) (*apiclient.WorkflowAgent, error) {
+	return nil, nil
+}
+func (m *mockClient) ReportUsage(ctx context.Context, buckets interface{}) error {
+	return nil
+}
 
 func TestExecutionService_DispatchRun(t *testing.T) {
 	mc := &mockClient{
