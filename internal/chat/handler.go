@@ -355,24 +355,9 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		} // end !hasRefs
 	}
 
-	// Hybrid routing with cascading fallback:
-	// 1. Simple queries → local Ollama (fast, free)
-	// 2. Claude Code CLI — primary reasoning (Max subscribers, free)
-	// 3. Gemini Flash Lite — fallback reasoning (cheap)
-	// 4. All fail → local Ollama (last resort)
+	// Routing: Claude CLI → Gemini → Ollama (local = offline fallback only)
 
-	simple := isSimpleQuery(req.Query)
-
-	// 1. Simple → local Ollama
-	if simple {
-		localModel := h.findLocalModel(ctx, model)
-		if localModel != "" {
-			tlog("route: local %s (simple)", localModel)
-			return h.processChatOllama(ctx, req, localModel)
-		}
-	}
-
-	// 2. Claude Code CLI — primary reasoning
+	// 1. Claude Code CLI — primary (Max subscribers, free, best quality)
 	claudePath := findClaude()
 	if claudePath != "" {
 		tlog("route: Claude Code CLI")
