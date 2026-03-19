@@ -19,10 +19,16 @@ type ToolExecutor interface {
 	Execute(ctx context.Context, name string, args map[string]interface{}) ([]byte, error)
 }
 
+// MCPExecutor calls nlook MCP tools (e.g. create_document, add_document_to_workspace).
+type MCPExecutor interface {
+	CallTool(ctx context.Context, name string, args map[string]interface{}) (interface{}, error)
+}
+
 // SkillRunner executes workflow skills by type.
 type SkillRunner struct {
 	httpClient   *http.Client
 	toolExecutor ToolExecutor
+	mcpClient    MCPExecutor
 }
 
 // NewSkillRunner creates a new SkillRunner.
@@ -37,6 +43,11 @@ func (r *SkillRunner) SetToolExecutor(e ToolExecutor) {
 	r.toolExecutor = e
 }
 
+// SetMCPClient sets the MCP client for mcp-type skill execution.
+func (r *SkillRunner) SetMCPClient(c MCPExecutor) {
+	r.mcpClient = c
+}
+
 // RunSkill dispatches execution to the appropriate handler based on skill type.
 func (r *SkillRunner) RunSkill(ctx context.Context, skill *apiclient.WorkflowSkill, agent *apiclient.WorkflowAgent, input map[string]interface{}) (map[string]interface{}, []string, error) {
 	switch skill.SkillType {
@@ -46,6 +57,8 @@ func (r *SkillRunner) RunSkill(ctx context.Context, skill *apiclient.WorkflowSki
 		return r.runAPI(ctx, skill, input)
 	case "tool":
 		return r.runTool(ctx, skill, input)
+	case "mcp":
+		return r.runMCP(ctx, skill, input)
 	default:
 		return map[string]interface{}{"message": "unsupported skill type"}, nil, nil
 	}
@@ -373,8 +386,68 @@ func (r *SkillRunner) runTool(ctx context.Context, skill *apiclient.WorkflowSkil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Template helpers
+// MCP skill — nlook API tool execution
 // ──────────────────────────────────────────────────────────────────────────────
+
+func (r *SkillRunner) runMCP(ctx context.Context, skill *apiclient.WorkflowSkill, input map[string]interface{}) (map[string]interface{}, []string, error) {
+	if r.mcpClient == nil {
+		return nil, nil, fmt.Errorf("mcp client not configured")
+	}
+
+	config := skill.Config
+	toolName, _ := config["tool_name"].(string)
+	if toolName == "" {
+		toolName = skill.Name
+	}
+
+	// Merge config args with input (input overrides)
+	args := make(map[string]interface{})
+	if configArgs, ok := config["args"].(map[string]interface{}); ok {
+		for k, v := range configArgs {
+			args[k] = v
+		}
+	}
+	for k, v := range input {
+		args[k] = v
+	}
+
+	// Resolve templates in string args
+	for k, v := range args {
+		if sv, ok := v.(string); ok {
+			args[k] = resolveTemplate(sv, input)
+		}
+	}
+
+	logs := []string{fmt.Sprintf("mcp call: %s", toolName)}
+
+	result, err := r.mcpClient.CallTool(ctx, toolName, args)
+	if err != nil {
+		return nil, logs, fmt.Errorf("mcp tool %s: %w", toolName, err)
+	}
+
+	output := toOutputMap(result)
+	logs = append(logs, fmt.Sprintf("mcp result: %d keys", len(output)))
+
+	return output, logs, nil
+}
+
+// toOutputMap converts an interface{} to map[string]interface{}.
+func toOutputMap(v interface{}) map[string]interface{} {
+	switch m := v.(type) {
+	case map[string]interface{}:
+		return m
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return map[string]interface{}{"result": fmt.Sprintf("%v", v)}
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return map[string]interface{}{"raw": string(raw)}
+		}
+		return out
+	}
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Ollama / local model support (OpenAI-compatible API)

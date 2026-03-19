@@ -228,9 +228,19 @@ func (g *GroupExecutor) findBranchChildren(dag *DAG, groupNode *DAGNode, branchL
 }
 
 // executeLoop repeats child node execution based on loop configuration.
-// Node Data expected: { "loop_count": 3 } or { "loop_field": "items" }
+// Node Data expected:
+//   - { "loop_count": 3 }                     — fixed count
+//   - { "loop_field": "nodeId.items" }         — count from array length
+//   - { "loop_type": "for_each", "source": "nodeId.body", "item_key": "item", "limit": 5 }
+//     — iterate over array elements, injecting each as item_key into RunContext
 func (g *GroupExecutor) executeLoop(ctx context.Context, rctx *RunContext, dag *DAG, groupNode *DAGNode, stepOrder *int, workflowID int64) (*StepResult, error) {
 	logs := []string{"loop node execution started"}
+
+	// Check for for_each mode
+	loopType, _ := groupNode.Node.Data["loop_type"].(string)
+	if loopType == "for_each" {
+		return g.executeForEachLoop(ctx, rctx, dag, groupNode, stepOrder, workflowID, logs)
+	}
 
 	loopCount := g.getLoopCount(rctx, groupNode)
 	if loopCount <= 0 {
@@ -285,6 +295,99 @@ func (g *GroupExecutor) executeLoop(ctx context.Context, rctx *RunContext, dag *
 		}
 
 		logs = append(logs, fmt.Sprintf("iteration %d/%d completed", i+1, loopCount))
+	}
+
+	return &StepResult{
+		Output: map[string]interface{}{
+			"iterations": len(iterationResults),
+			"results":    iterationResults,
+		},
+		Status:   "completed",
+		LogLines: logs,
+	}, nil
+}
+
+// executeForEachLoop iterates over array elements from a source field.
+// Each element is injected into RunContext under item_key so child nodes can reference it.
+func (g *GroupExecutor) executeForEachLoop(ctx context.Context, rctx *RunContext, dag *DAG, groupNode *DAGNode, stepOrder *int, workflowID int64, logs []string) (*StepResult, error) {
+	data := groupNode.Node.Data
+	source, _ := data["source"].(string)
+	itemKey, _ := data["item_key"].(string)
+	if itemKey == "" {
+		itemKey = "item"
+	}
+
+	// Resolve source to array
+	sourceVal := g.resolveFieldValue(rctx, source)
+	items, ok := sourceVal.([]interface{})
+	if !ok {
+		logs = append(logs, fmt.Sprintf("for_each source '%s' is not an array, skipping", source))
+		return &StepResult{
+			Output:   map[string]interface{}{"iterations": 0},
+			Status:   "completed",
+			LogLines: logs,
+		}, nil
+	}
+
+	// Apply limit if set
+	limit := len(items)
+	if lim, ok := data["limit"]; ok {
+		switch v := lim.(type) {
+		case float64:
+			if int(v) < limit {
+				limit = int(v)
+			}
+		case int:
+			if v < limit {
+				limit = v
+			}
+		}
+	}
+
+	children := g.getChildNodes(dag, groupNode.Node.NodeID)
+	if len(children) == 0 {
+		children = g.getDirectChildren(groupNode)
+	}
+
+	logs = append(logs, fmt.Sprintf("for_each: source=%s items=%d limit=%d item_key=%s children=%d", source, len(items), limit, itemKey, len(children)))
+
+	iterationResults := make([]map[string]interface{}, 0, limit)
+
+	for i := 0; i < limit; i++ {
+		if ctx.Err() != nil {
+			return &StepResult{Status: "failed", Error: "cancelled", LogLines: logs}, ctx.Err()
+		}
+
+		// Inject current item and loop metadata into context
+		rctx.SetNodeOutput(groupNode.Node.NodeID, map[string]interface{}{
+			"loop_index": i,
+			"loop_count": limit,
+			itemKey:      items[i],
+		})
+
+		var iterOutput map[string]interface{}
+		for _, child := range children {
+			childType := child.Node.NodeType
+			if childType == "start" || childType == "end" {
+				continue
+			}
+
+			*stepOrder++
+			result, err := g.stepExecutor.Execute(ctx, rctx, workflowID, child.Node, *stepOrder)
+			if err != nil {
+				return nil, fmt.Errorf("for_each iteration %d child %s: %w", i, child.Node.NodeID, err)
+			}
+			if result.Status == "failed" {
+				return result, nil
+			}
+			iterOutput = result.Output
+		}
+
+		if iterOutput != nil {
+			iterationResults = append(iterationResults, iterOutput)
+		}
+
+		logs = append(logs, fmt.Sprintf("for_each iteration %d/%d completed", i+1, limit))
 	}
 
 	return &StepResult{

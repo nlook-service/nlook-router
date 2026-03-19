@@ -22,6 +22,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/chat"
 	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/llm"
+	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
@@ -97,6 +98,9 @@ func RunDaemon(cfg *config.Config) error {
 	skillRunner := engine.NewSkillRunner()
 	if toolsBridge != nil {
 		skillRunner.SetToolExecutor(toolsBridge)
+	}
+	if cfg.APIKey != "" {
+		skillRunner.SetMCPClient(mcp.NewClient(cfg.APIKey))
 	}
 	stepExec := engine.NewStepExecutor(client, skillRunner)
 	eng := engine.NewWorkflowEngine(stepExec)

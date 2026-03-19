@@ -133,6 +133,16 @@ func GetChatTools() []Tool {
 		{Name: "get_workspace", Description: "Get workspace details", InputSchema: objSchema(map[string]interface{}{
 			"id": numProp("Workspace ID"),
 		}, "id")},
+		{Name: "add_document_to_workspace", Description: "Add a document to a workspace/collection", InputSchema: objSchema(map[string]interface{}{
+			"workspace_id": numProp("Workspace/Collection ID"),
+			"document_id":  numProp("Document ID to add"),
+		}, "workspace_id", "document_id")},
+
+		// ── Notifications ──
+		{Name: "send_notification", Description: "Send a notification to yourself", InputSchema: objSchema(map[string]interface{}{
+			"title":   strProp("Notification title"),
+			"message": strProp("Notification message"),
+		}, "title", "message")},
 
 		// ── Workflows ──
 		{Name: "list_workflows", Description: "List all workflows", InputSchema: objSchema(map[string]interface{}{})},
@@ -214,6 +224,14 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]inte
 		return c.get(ctx, "/api/v1/public/collections")
 	case "get_workspace":
 		return c.get(ctx, fmt.Sprintf("/api/v1/public/collections/%v", args["id"]))
+	case "add_document_to_workspace":
+		wsID := args["workspace_id"]
+		delete(args, "workspace_id")
+		return c.post(ctx, fmt.Sprintf("/api/v1/public/collections/%v/documents", wsID), args)
+
+	// Notifications
+	case "send_notification":
+		return c.post(ctx, "/api/v1/public/notifications/self", args)
 
 	// Workflows
 	case "list_workflows":
