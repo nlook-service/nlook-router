@@ -525,11 +525,6 @@ func (h *Handler) processChatVLLM(ctx context.Context, req *ChatRequestPayload, 
 		return nil, fmt.Errorf("vLLM chat: %w", err)
 	}
 
-	h.sendResponse("chat:delta", ChatDeltaPayload{
-		ConversationID: req.ConversationID, MessageID: req.MessageID,
-		Delta: "", Done: true, FullContent: fullText, Model: model,
-	})
-
 	return &ChatResponsePayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Content: fullText, Model: model, Role: "assistant",
@@ -593,11 +588,6 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 						InputTokens: inTok, OutputTokens: outTok, ElapsedMs: time.Since(toolStart).Milliseconds(),
 					})
 				}
-				h.sendResponse("chat:delta", ChatDeltaPayload{
-					ConversationID: req.ConversationID, MessageID: req.MessageID,
-					Delta: "", Done: true, FullContent: fullText, Model: model,
-					TokensUsed: inTok + outTok,
-				})
 				return &ChatResponsePayload{
 					ConversationID: req.ConversationID, MessageID: req.MessageID,
 					Content: fullText, Model: model, Role: "assistant",
@@ -646,12 +636,6 @@ func (h *Handler) processChatOllama(ctx context.Context, req *ChatRequestPayload
 	}
 
 	fullText = stripThinking(fullText)
-
-	h.sendResponse("chat:delta", ChatDeltaPayload{
-		ConversationID: req.ConversationID, MessageID: req.MessageID,
-		Delta: "", Done: true, FullContent: fullText, Model: model,
-		TokensUsed: inTok + outTok,
-	})
 
 	return &ChatResponsePayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
@@ -1008,12 +992,6 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Delta: content, Done: false,
 	})
-	h.sendResponse("chat:delta", ChatDeltaPayload{
-		ConversationID: req.ConversationID, MessageID: req.MessageID,
-		Delta: "", Done: true, FullContent: content, Model: model,
-		TokensUsed: inTok + outTok,
-	})
-
 	return &ChatResponsePayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Content: content, Model: model, Role: "assistant",
@@ -1058,12 +1036,6 @@ func (h *Handler) processChatOllamaSimple(ctx context.Context, req *ChatRequestP
 	}
 
 	fullText = stripThinking(fullText)
-
-	h.sendResponse("chat:delta", ChatDeltaPayload{
-		ConversationID: req.ConversationID, MessageID: req.MessageID,
-		Delta: "", Done: true, FullContent: fullText, Model: model,
-		TokensUsed: inTok + outTok,
-	})
 
 	return &ChatResponsePayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
@@ -1280,12 +1252,6 @@ func (h *Handler) processChatGemini(ctx context.Context, req *ChatRequestPayload
 	}
 
 	model := client.Model()
-	h.sendResponse("chat:delta", ChatDeltaPayload{
-		ConversationID: req.ConversationID, MessageID: req.MessageID,
-		Delta: "", Done: true, FullContent: fullText, Model: model,
-		TokensUsed: inTok + outTok,
-	})
-
 	return &ChatResponsePayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Content: fullText, Model: model, Role: "assistant",
