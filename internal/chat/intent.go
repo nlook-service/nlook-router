@@ -229,9 +229,11 @@ func ExtractDocumentRefs(ctx context.Context, query string, mcpClient *mcp.Clien
 	found := false
 
 	for _, p := range patterns {
+		searchStr := "[" + p.prefix
+		refLog("ref: searching for %s in query (len=%d)", searchStr, len(query))
 		idx := 0
 		for {
-			start := strings.Index(query[idx:], "["+p.prefix)
+			start := strings.Index(query[idx:], searchStr)
 			if start == -1 {
 				break
 			}
@@ -243,7 +245,8 @@ func ExtractDocumentRefs(ctx context.Context, query string, mcpClient *mcp.Clien
 			end += start
 
 			// Parse: [@document:123:title]
-			inner := query[start+2+len(p.prefix)-1 : end] // "123:title"
+			inner := query[start+len(searchStr) : end] // "123:title"
+			refLog("ref: parsed inner=%s", truncateStr(inner, 50))
 			parts := strings.SplitN(inner, ":", 2)
 			if len(parts) < 1 {
 				idx = end + 1
@@ -258,8 +261,12 @@ func ExtractDocumentRefs(ctx context.Context, query string, mcpClient *mcp.Clien
 				}
 			}
 
+			refLog("ref: extracted id=%.0f", id)
 			if id > 0 {
 				result, err := mcpClient.CallTool(ctx, p.tool, map[string]interface{}{"id": id})
+				if err != nil {
+					refLog("ref: ✗ %s failed: %v", p.tool, err)
+				}
 				if err == nil {
 					data, _ := json.MarshalIndent(result, "", "  ")
 					if !found {
