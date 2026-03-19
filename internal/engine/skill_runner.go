@@ -167,9 +167,6 @@ func (r *SkillRunner) callClaudeCLI(ctx context.Context, model, system, prompt s
 	logs = append(logs, fmt.Sprintf("claude CLI: %s model=%s prompt=%d chars", claudePath, model, fullPrompt.Len()))
 
 	args := []string{"-p", fullPrompt.String(), "--model", model, "--output-format", "json"}
-	if maxTokens > 0 {
-		args = append(args, "--max-tokens", fmt.Sprintf("%d", maxTokens))
-	}
 
 	cmd := exec.CommandContext(ctx, claudePath, args...)
 	output, err := cmd.Output()
