@@ -355,38 +355,55 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		} // end !hasRefs
 	}
 
-	// Routing: Claude CLI → Gemini → Ollama (local = offline fallback only)
-
-	// 1. Claude Code CLI — primary (Max subscribers, free, best quality)
-	claudePath := findClaude()
-	if claudePath != "" {
-		tlog("route: Claude Code CLI")
-		resp, err := h.processChatClaudeCLI(ctx, req, claudePath)
-		if err == nil {
-			return resp, nil
-		}
-		tlog("route: Claude CLI failed: %v, trying Gemini", err)
-	}
-
-	// 3. Gemini Cloud — fallback reasoning
-	geminiClient := gemini.NewClient()
-	if geminiClient != nil {
-		tlog("route: Gemini Cloud (%s)", geminiClient.Model())
-		resp, err := h.processChatGemini(ctx, req, geminiClient)
-		if err == nil {
-			return resp, nil
-		}
-		tlog("route: Gemini failed: %v", err)
-	}
-
-	// 4. Local Ollama — last resort
+	// Smart routing: qwen classifies complexity → simple=local, complex=Claude
 	localModel := h.findLocalModel(ctx, model)
+	complexity := h.classifyComplexity(ctx, req.Query, localModel, tlog)
+
+	switch complexity {
+	case "simple":
+		// Simple: qwen handles directly (fast, free)
+		if localModel != "" {
+			tlog("route: local %s (simple)", localModel)
+			return h.processChatOllama(ctx, req, localModel)
+		}
+
+	case "complex":
+		// Complex: Claude CLI → Gemini → Ollama fallback
+		claudePath := findClaude()
+		if claudePath != "" {
+			tlog("route: Claude Code CLI (complex)")
+			resp, err := h.processChatClaudeCLI(ctx, req, claudePath)
+			if err == nil {
+				return resp, nil
+			}
+			tlog("route: Claude CLI failed: %v, trying Gemini", err)
+		}
+
+		geminiClient := gemini.NewClient()
+		if geminiClient != nil {
+			tlog("route: Gemini Cloud (%s)", geminiClient.Model())
+			resp, err := h.processChatGemini(ctx, req, geminiClient)
+			if err == nil {
+				return resp, nil
+			}
+			tlog("route: Gemini failed: %v", err)
+		}
+	}
+
+	// Fallback: local model for anything
 	if localModel != "" {
-		tlog("route: local %s (last resort)", localModel)
+		tlog("route: local %s (fallback)", localModel)
 		return h.processChatOllama(ctx, req, localModel)
 	}
 
-	return nil, fmt.Errorf("no LLM available: configure gemini_api_key, ANTHROPIC_API_KEY, or install Ollama")
+	// Last resort: Claude CLI
+	claudePath := findClaude()
+	if claudePath != "" {
+		tlog("route: Claude Code CLI (last resort)")
+		return h.processChatClaudeCLI(ctx, req, claudePath)
+	}
+
+	return nil, fmt.Errorf("no LLM available: configure Ollama or Claude Code CLI")
 }
 
 // processChatWithTools uses Anthropic API with tool_use for MCP integration.
@@ -878,7 +895,7 @@ func (h *Handler) sendResponse(msgType string, payload interface{}) {
 		log.Printf("chat: marshal ws message error: %v", err)
 		return
 	}
-	log.Printf("ws_send: type=%s len=%d", msgType, len(msg))
+	log.Printf("ws_send: type=%s len=%d payload=%s", msgType, len(msg), string(payloadBytes))
 	h.sendWS(msg)
 }
 
@@ -1005,6 +1022,89 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 		Content: content, Model: model, Role: "assistant",
 		TokensUsed: inTok + outTok,
 	}, nil
+}
+
+// classifyComplexity determines if a query is "simple" or "complex".
+// Uses fast keyword check first, then qwen LLM for ambiguous cases.
+func (h *Handler) classifyComplexity(ctx context.Context, query string, localModel string, tlog func(string, ...interface{})) string {
+	clean := strings.TrimSpace(query)
+
+	// Strip tool result prefix for classification
+	classifyQuery := clean
+	if idx := strings.Index(clean, "[Tool Result:"); idx >= 0 {
+		classifyQuery = clean[:idx]
+	}
+	classifyQuery = strings.TrimSpace(classifyQuery)
+
+	// 1. Very short = simple (greetings, yes/no)
+	if len(classifyQuery) < 10 {
+		return "simple"
+	}
+
+	// 2. Keywords → complex
+	complexKeywords := []string{
+		"작성해", "써줘", "만들어", "분석해", "비교해", "요약해", "번역해",
+		"설명해", "자세히", "왜", "어떻게 하면",
+		"SEO", "마케팅", "블로그", "리포트", "보고서", "코드",
+		"write", "analyze", "summarize", "translate", "explain",
+		"generate", "create", "draft", "compare", "how to",
+	}
+	lower := strings.ToLower(classifyQuery)
+	for _, kw := range complexKeywords {
+		if strings.Contains(lower, strings.ToLower(kw)) {
+			return "complex"
+		}
+	}
+
+	// 3. Keywords → simple
+	simpleKeywords := []string{
+		"목록", "조회", "보여줘", "알려줘", "뭐야", "몇개",
+		"list", "show", "what", "how many", "check",
+	}
+	for _, kw := range simpleKeywords {
+		if strings.Contains(lower, strings.ToLower(kw)) {
+			return "simple"
+		}
+	}
+
+	// 4. Tool results attached → complex (needs reasoning over data)
+	if strings.Contains(clean, "[Tool Result:") {
+		return "complex"
+	}
+
+	// 5. Medium length without clear keywords → use qwen to classify
+	if localModel != "" {
+		ollamaClient := ollama.NewClient()
+		if ollamaClient.IsRunning(ctx) {
+			classifyPrompt := fmt.Sprintf(
+				`Classify this user message as "simple" or "complex".
+Simple: greetings, status checks, listing items, short Q&A, basic CRUD.
+Complex: writing, analysis, comparison, explanation, code generation, document creation.
+
+Reply with ONLY one word: simple or complex
+
+Message: %s`, classifyQuery)
+
+			result, _, _, err := ollamaClient.ChatStream(ctx, localModel, "", classifyPrompt,
+				ollama.ChatOptions{MaxTokens: 5, Temperature: 0.0},
+				nil,
+			)
+			if err == nil {
+				result = strings.TrimSpace(strings.ToLower(result))
+				if strings.Contains(result, "simple") {
+					tlog("classify: qwen → simple")
+					return "simple"
+				}
+				if strings.Contains(result, "complex") {
+					tlog("classify: qwen → complex")
+					return "complex"
+				}
+			}
+		}
+	}
+
+	// Default: complex (safer to use better model)
+	return "complex"
 }
 
 // findLocalModel returns a usable local model name, or empty string.
