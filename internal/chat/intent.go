@@ -127,11 +127,11 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 
 	switch intent.Action {
 	case "list_tasks":
-		tlog("intent: 📋 calling list_tasks")
-		result, err = mcpClient.CallTool(ctx, "list_tasks", map[string]interface{}{"limit": 20})
+		tlog("intent: 📋 calling list_tasks (pending, limit 10)")
+		result, err = mcpClient.CallTool(ctx, "list_tasks", map[string]interface{}{"status": "pending", "limit": 10})
 	case "list_documents":
-		tlog("intent: 📄 calling list_documents")
-		result, err = mcpClient.CallTool(ctx, "list_documents", map[string]interface{}{"limit": 20})
+		tlog("intent: 📄 calling list_documents (limit 10)")
+		result, err = mcpClient.CallTool(ctx, "list_documents", map[string]interface{}{"limit": 10})
 	case "confirm_create_task", "confirm_create_document":
 		tlog("intent: 📋 fetching workspaces for confirmation")
 		wsResult, wsErr := mcpClient.CallTool(ctx, "list_workspaces", map[string]interface{}{})
@@ -161,7 +161,7 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 	tlog("intent: ✓ result size=%d bytes", len(data))
 
 	// Truncate large results to prevent slow LLM processing
-	const maxResultSize = 3000
+	const maxResultSize = 1500
 	resultStr := string(data)
 	if len(resultStr) > maxResultSize {
 		resultStr = resultStr[:maxResultSize] + "\n... (truncated, showing first items)"
