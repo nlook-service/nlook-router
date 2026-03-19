@@ -280,7 +280,7 @@ func (g *GroupExecutor) executeLoop(ctx context.Context, rctx *RunContext, dag *
 			}
 
 			*stepOrder++
-			result, err := g.stepExecutor.Execute(ctx, rctx, workflowID, child.Node, *stepOrder)
+			result, err := g.stepExecutor.Execute(ctx, rctx, workflowID, child.Node, *stepOrder, groupNode.Node.NodeID)
 			if err != nil {
 				return nil, fmt.Errorf("loop iteration %d child %s: %w", i, child.Node.NodeID, err)
 			}
@@ -373,7 +373,7 @@ func (g *GroupExecutor) executeForEachLoop(ctx context.Context, rctx *RunContext
 			}
 
 			*stepOrder++
-			result, err := g.stepExecutor.Execute(ctx, rctx, workflowID, child.Node, *stepOrder)
+			result, err := g.stepExecutor.Execute(ctx, rctx, workflowID, child.Node, *stepOrder, groupNode.Node.NodeID)
 			if err != nil {
 				return nil, fmt.Errorf("for_each iteration %d child %s: %w", i, child.Node.NodeID, err)
 			}
