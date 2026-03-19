@@ -970,18 +970,17 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 		return nil, fmt.Errorf("claude CLI start: %w", err)
 	}
 
-	var fullText strings.Builder
 	var inTok, outTok int
+	var lastText string // track cumulative text to compute deltas
 	model := "claude-haiku-4-5 (CLI)"
 
-	// Stream tokens as they arrive
+	// Stream tokens as they arrive — each "assistant" event has cumulative text
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		var event struct {
 			Type    string `json:"type"`
-			Subtype string `json:"subtype"`
 			Message struct {
 				Content []struct {
 					Type string `json:"type"`
@@ -1000,32 +999,33 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 
 		switch event.Type {
 		case "assistant":
-			// Extract text content from message
+			// Content is cumulative — compute delta from last seen text
 			for _, c := range event.Message.Content {
 				if c.Type == "text" && c.Text != "" {
-					delta := c.Text
-					// Send delta to client
-					h.sendResponse("chat:delta", ChatDeltaPayload{
-						ConversationID: req.ConversationID,
-						MessageID:      req.MessageID,
-						Delta:          delta,
-						Done:           false,
-					})
-					fullText.WriteString(delta)
+					if len(c.Text) > len(lastText) {
+						delta := c.Text[len(lastText):]
+						h.sendResponse("chat:delta", ChatDeltaPayload{
+							ConversationID: req.ConversationID,
+							MessageID:      req.MessageID,
+							Delta:          delta,
+							Done:           false,
+						})
+						lastText = c.Text
+					}
 				}
 			}
 		case "result":
 			inTok = event.Usage.InputTokens
 			outTok = event.Usage.OutputTokens
-			if event.Result != "" && fullText.Len() == 0 {
-				fullText.WriteString(event.Result)
+			if event.Result != "" && lastText == "" {
+				lastText = event.Result
 			}
 		}
 	}
 
 	_ = cmd.Wait()
 
-	content := stripThinking(fullText.String())
+	content := stripThinking(lastText)
 
 	if h.usageTracker != nil {
 		h.usageTracker.Record(usage.TokenUsage{
