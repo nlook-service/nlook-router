@@ -3,12 +3,14 @@ package chat
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/nlook-service/nlook-router/internal/cache"
 	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/ollama"
+	"github.com/nlook-service/nlook-router/internal/tokenizer"
 )
 
 /*
@@ -39,59 +41,62 @@ func NewPromptBuilder(cs *cache.Store, vs *embedding.VectorStore, ms *memory.Sto
 	}
 }
 
-// BuildSystemPrompt assembles the full system prompt for a chat request.
+// BuildSystemPrompt assembles the full system prompt with token budget management.
 func (pb *PromptBuilder) BuildSystemPrompt(lang, query string, conversationID int64) string {
 	if lang == "" {
 		lang = detectLang(query)
 	}
 
+	budget := tokenizer.NewBudget(tokenizer.MaxPromptTokens)
+
+	// [System] — Base instruction (always included, ~200 tokens)
+	system := budget.Add("system", baseSystemPrompt, 0)
+
 	var sb strings.Builder
+	sb.WriteString(system)
 
-	// [System] — Base instruction
-	sb.WriteString(baseSystemPrompt)
-
-	// [User Profile + Long Memory]
+	// [User Profile + Long Memory] — ~200 tokens max
 	if pb.memoryStore != nil {
 		if memCtx := pb.memoryStore.BuildPromptContext(conversationID); memCtx != "" {
-			sb.WriteString(memCtx)
+			sb.WriteString(budget.Add("memory", memCtx, 500))
 		}
 	}
 
-	// [RAG Context] — Semantic search
+	// [RAG Context] — Up to 8000 tokens for document content
 	if pb.vectorStore != nil {
 		results := pb.vectorStore.Search(context.Background(), query, 5)
 		if len(results) > 0 {
-			sb.WriteString("\n\n[Relevant Documents — semantic search]\n")
+			var ragSb strings.Builder
+			ragSb.WriteString("\n\n[Relevant Documents]\n")
 			for _, r := range results {
-				content := r.Entry.Content
-				if len(content) > 2000 {
-					content = content[:2000] + "..."
-				}
-				sb.WriteString(fmt.Sprintf("\n## %s (relevance: %.0f%%)\n%s\n", r.Entry.Title, r.Score*100, content))
+				ragSb.WriteString(fmt.Sprintf("\n## %s (%.0f%%)\n%s\n", r.Entry.Title, r.Score*100, r.Entry.Content))
 			}
+			sb.WriteString(budget.Add("rag", ragSb.String(), 8000))
 		}
 	}
 
-	// [Data Summary] — Cache overview (tasks, recent docs)
+	// [Data Summary] — Up to 4000 tokens for tasks/docs overview
 	if pb.cacheStore != nil {
-		// Query-specific context first
 		if ctx := pb.cacheStore.BuildContextForQuery(query); ctx != "" {
-			sb.WriteString(ctx)
+			sb.WriteString(budget.Add("cache", ctx, 4000))
 		} else if summary := pb.cacheStore.Summary(); summary != "" {
-			sb.WriteString(summary)
+			sb.WriteString(budget.Add("cache", summary, 2000))
 		}
 	}
 
-	// [Language Instruction] — Must be at the end for maximum effect
+	// [Language Instruction] — Always at the end
+	langInstr := ""
 	switch lang {
 	case "ko":
-		sb.WriteString("\n\nCRITICAL: You MUST respond ONLY in Korean (한국어). 절대로 중국어, 영어 등 다른 언어를 사용하지 마세요.")
+		langInstr = "\n\nCRITICAL: You MUST respond ONLY in Korean (한국어). 절대로 중국어, 영어 등 다른 언어를 사용하지 마세요."
 	case "en":
-		sb.WriteString("\n\nCRITICAL: You MUST respond ONLY in English.")
+		langInstr = "\n\nCRITICAL: You MUST respond ONLY in English."
 	default:
-		sb.WriteString("\n\nCRITICAL: Respond ONLY in the same language the user writes in. Never mix languages.")
+		langInstr = "\n\nCRITICAL: Respond ONLY in the same language the user writes in. Never mix languages."
 	}
+	sb.WriteString(budget.Add("lang", langInstr, 0))
 
+	log.Printf("prompt: %s", budget.Summary())
 	return sb.String()
 }
 
