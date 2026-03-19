@@ -960,28 +960,72 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 	prompt.WriteString(req.Query)
 
 	cliStart := time.Now()
-	cmd := exec.CommandContext(ctx, claudePath, "-p", prompt.String(), "--model", "claude-haiku-4-5-20251001", "--output-format", "json")
-	output, err := cmd.Output()
+	cmd := exec.CommandContext(ctx, claudePath, "-p", prompt.String(), "--model", "claude-haiku-4-5-20251001", "--output-format", "stream-json", "--verbose")
+
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("claude CLI: %w", err)
+		return nil, fmt.Errorf("claude CLI pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("claude CLI start: %w", err)
 	}
 
-	var cliResult struct {
-		Result string `json:"result"`
-		Usage  struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-		} `json:"usage"`
-	}
-	rawOutput := strings.TrimSpace(string(output))
-	if jsonErr := json.Unmarshal([]byte(rawOutput), &cliResult); jsonErr != nil {
-		// Fallback: treat entire output as plain text
-		cliResult.Result = rawOutput
+	var fullText strings.Builder
+	var inTok, outTok int
+	model := "claude-haiku-4-5 (CLI)"
+
+	// Stream tokens as they arrive
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var event struct {
+			Type    string `json:"type"`
+			Subtype string `json:"subtype"`
+			Message struct {
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+			Result string `json:"result"`
+			Usage  struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+
+		switch event.Type {
+		case "assistant":
+			// Extract text content from message
+			for _, c := range event.Message.Content {
+				if c.Type == "text" && c.Text != "" {
+					delta := c.Text
+					// Send delta to client
+					h.sendResponse("chat:delta", ChatDeltaPayload{
+						ConversationID: req.ConversationID,
+						MessageID:      req.MessageID,
+						Delta:          delta,
+						Done:           false,
+					})
+					fullText.WriteString(delta)
+				}
+			}
+		case "result":
+			inTok = event.Usage.InputTokens
+			outTok = event.Usage.OutputTokens
+			if event.Result != "" && fullText.Len() == 0 {
+				fullText.WriteString(event.Result)
+			}
+		}
 	}
 
-	content := stripThinking(strings.TrimSpace(cliResult.Result))
-	inTok := cliResult.Usage.InputTokens
-	outTok := cliResult.Usage.OutputTokens
+	_ = cmd.Wait()
+
+	content := stripThinking(fullText.String())
 
 	if h.usageTracker != nil {
 		h.usageTracker.Record(usage.TokenUsage{
@@ -990,13 +1034,6 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 		})
 	}
 
-	model := "claude-haiku-4-5 (CLI)"
-
-	// Send as single delta (no streaming from CLI)
-	h.sendResponse("chat:delta", ChatDeltaPayload{
-		ConversationID: req.ConversationID, MessageID: req.MessageID,
-		Delta: content, Done: false,
-	})
 	return &ChatResponsePayload{
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Content: content, Model: model, Role: "assistant",
