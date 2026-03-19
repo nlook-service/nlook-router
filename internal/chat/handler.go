@@ -1133,18 +1133,25 @@ Reply with ONLY one word: simple or complex
 
 Message: %s`, classifyQuery)
 
-			result, _, _, err := ollamaClient.ChatStream(ctx, localModel, "", classifyPrompt,
+			result, inTok, outTok, err := ollamaClient.ChatStream(ctx, localModel, "", classifyPrompt,
 				ollama.ChatOptions{MaxTokens: 5, Temperature: 0.0},
 				nil,
 			)
 			if err == nil {
+				// Track classifier token usage
+				if h.usageTracker != nil {
+					h.usageTracker.Record(usage.TokenUsage{
+						Provider: "ollama", Model: localModel, Category: "intent",
+						InputTokens: inTok, OutputTokens: outTok,
+					})
+				}
 				result = strings.TrimSpace(strings.ToLower(result))
 				if strings.Contains(result, "simple") {
-					tlog("classify: qwen → simple")
+					tlog("classify: qwen → simple (in=%d out=%d)", inTok, outTok)
 					return "simple"
 				}
 				if strings.Contains(result, "complex") {
-					tlog("classify: qwen → complex")
+					tlog("classify: qwen → complex (in=%d out=%d)", inTok, outTok)
 					return "complex"
 				}
 			}
