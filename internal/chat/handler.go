@@ -361,10 +361,10 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 
 	switch complexity {
 	case "simple":
-		// Simple: qwen handles directly (fast, free)
+		// Simple: qwen streaming directly (no tool calling, fast, free)
 		if localModel != "" {
-			tlog("route: local %s (simple)", localModel)
-			return h.processChatOllama(ctx, req, localModel)
+			tlog("route: local %s (simple, stream-only)", localModel)
+			return h.processChatOllamaSimple(ctx, req, localModel)
 		}
 
 	case "complex":
@@ -1023,6 +1023,57 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 		ConversationID: req.ConversationID, MessageID: req.MessageID,
 		Content: content, Model: model, Role: "assistant",
 		TokensUsed: inTok + outTok,
+	}, nil
+}
+
+// processChatOllamaSimple uses streaming without tool calling (for simple queries).
+func (h *Handler) processChatOllamaSimple(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
+	ollamaClient := ollama.NewClient()
+	systemPrompt := h.getSystemPrompt(req.Lang, req.Query, req.ConversationID)
+
+	// Add language instruction
+	for _, r := range req.Query {
+		if r >= 0xAC00 && r <= 0xD7AF {
+			systemPrompt += "\n\n반드시 한국어로 응답하세요."
+			break
+		}
+	}
+
+	streamStart := time.Now()
+	fullText, inTok, outTok, err := ollamaClient.ChatStream(ctx, model, systemPrompt, req.Query,
+		ollama.ChatOptions{Temperature: 0.7, MaxTokens: 2048, History: h.getOllamaHistory(req)},
+		func(text string) {
+			h.sendResponse("chat:delta", ChatDeltaPayload{
+				ConversationID: req.ConversationID,
+				MessageID:      req.MessageID,
+				Delta:          text,
+				Done:           false,
+			})
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("ollama simple chat: %w", err)
+	}
+
+	if h.usageTracker != nil {
+		h.usageTracker.Record(usage.TokenUsage{
+			UserID: req.UserID, Provider: "ollama", Model: model, Category: "chat",
+			InputTokens: inTok, OutputTokens: outTok, ElapsedMs: time.Since(streamStart).Milliseconds(),
+		})
+	}
+
+	fullText = stripThinking(fullText)
+
+	h.sendResponse("chat:delta", ChatDeltaPayload{
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Delta: "", Done: true, FullContent: fullText, Model: model,
+		TokensUsed: inTok + outTok,
+	})
+
+	return &ChatResponsePayload{
+		ConversationID: req.ConversationID, MessageID: req.MessageID,
+		Content: fullText, Model: model, Role: "assistant",
+		TokensUsed: inTok + outTok, ElapsedMs: time.Since(streamStart).Milliseconds(),
 	}, nil
 }
 
