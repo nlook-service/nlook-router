@@ -1,7 +1,13 @@
 package tokenizer
 
 import (
+	"encoding/json"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"unicode"
 )
 
@@ -141,6 +147,95 @@ func (b *Budget) Summary() string {
 	}
 	sb.WriteString(" total=" + itoa(b.used) + "/" + itoa(b.MaxTokens) + "]")
 	return sb.String()
+}
+
+// ExactTokenCount uses Python HuggingFace tokenizer for accurate count.
+// Falls back to EstimateTokens if Python is unavailable.
+var (
+	pythonAvailable     bool
+	pythonChecked       bool
+	pythonTokenizerPath string
+	pythonMu            sync.Once
+)
+
+func initPython() {
+	// Find tokenize.py
+	exePath, _ := os.Executable()
+	candidates := []string{
+		filepath.Join(filepath.Dir(exePath), "tools-bridge", "tokenize.py"),
+		filepath.Join(filepath.Dir(exePath), "..", "tools-bridge", "tokenize.py"),
+		"tools-bridge/tokenize.py",
+	}
+	// Check config tools_bridge_dir
+	home, _ := os.UserHomeDir()
+	candidates = append(candidates, filepath.Join(home, ".nlook", "tools-bridge", "tokenize.py"))
+
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			pythonTokenizerPath = path
+			pythonAvailable = true
+			log.Printf("tokenizer: using Python tokenizer at %s", path)
+			return
+		}
+	}
+	log.Printf("tokenizer: Python tokenizer not found, using estimation")
+}
+
+// ExactTokenCount returns accurate token count using Python tokenizer.
+func ExactTokenCount(text, model string) int {
+	pythonMu.Do(initPython)
+	if !pythonAvailable {
+		return EstimateTokens(text)
+	}
+
+	cmd := exec.Command("python3", pythonTokenizerPath, "--model", model, "--count-only", "--text", text)
+	out, err := cmd.Output()
+	if err != nil {
+		return EstimateTokens(text)
+	}
+
+	count := 0
+	for _, c := range strings.TrimSpace(string(out)) {
+		if c >= '0' && c <= '9' {
+			count = count*10 + int(c-'0')
+		}
+	}
+	if count == 0 {
+		return EstimateTokens(text)
+	}
+	return count
+}
+
+// TokenInfo returns detailed tokenization info.
+func TokenInfo(text, model string) map[string]interface{} {
+	pythonMu.Do(initPython)
+	if !pythonAvailable {
+		return map[string]interface{}{
+			"count":  EstimateTokens(text),
+			"method": "estimate",
+			"model":  model,
+		}
+	}
+
+	cmd := exec.Command("python3", pythonTokenizerPath, "--model", model, "--text", text)
+	out, err := cmd.Output()
+	if err != nil {
+		return map[string]interface{}{
+			"count":  EstimateTokens(text),
+			"method": "estimate",
+			"model":  model,
+		}
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return map[string]interface{}{
+			"count":  EstimateTokens(text),
+			"method": "estimate",
+			"model":  model,
+		}
+	}
+	return result
 }
 
 func isCJK(r rune) bool {
