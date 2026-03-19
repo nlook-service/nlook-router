@@ -1029,12 +1029,12 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 // processChatOllamaSimple uses streaming without tool calling (for simple queries).
 func (h *Handler) processChatOllamaSimple(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
 	ollamaClient := ollama.NewClient()
-	systemPrompt := h.getSystemPrompt(req.Lang, req.Query, req.ConversationID)
 
-	// Add language instruction
+	// Simple system prompt for small model — avoid prompt regurgitation
+	systemPrompt := "You are nlook AI assistant. Be concise and helpful."
 	for _, r := range req.Query {
 		if r >= 0xAC00 && r <= 0xD7AF {
-			systemPrompt += "\n\n반드시 한국어로 응답하세요."
+			systemPrompt = "당신은 nlook AI 어시스턴트입니다. 간결하고 도움이 되게 답변하세요."
 			break
 		}
 	}
