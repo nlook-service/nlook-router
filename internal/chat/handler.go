@@ -225,10 +225,16 @@ Intent classification:
 3. If general question → answer directly without tools
 
 IMPORTANT - Linking format:
-When mentioning documents or tasks from tool results, ALWAYS use this link format:
+When mentioning items, ALWAYS use this clickable link format:
 - Documents: [@document:ID:title] (e.g. [@document:123:회의록])
 - Tasks: [@task:ID:title] (e.g. [@task:456:버그 수정])
-This creates clickable links in the UI. Never use plain text for referenced items.
+- Workflows: [@workflow:ID:title] (e.g. [@workflow:10:데이터 파이프라인])
+- Agents: [@agent:ID:name] (e.g. [@agent:5:번역 에이전트])
+- Skills: [@skill:ID:name] (e.g. [@skill:3:웹 검색])
+- Runs: [@run:ID:title] (e.g. [@run:100:실행 #100])
+- Schedules: [@schedule:ID:name] (e.g. [@schedule:7:매일 9시])
+- Pages: [@page:/path:label] (e.g. [@page:/workflows/schedules:스케줄 관리])
+Never use plain text for referenced items. Always wrap in [@type:id:title] format.
 
 Always confirm before creating/modifying content. Respond concisely.`
 
