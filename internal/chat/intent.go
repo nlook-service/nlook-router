@@ -29,7 +29,7 @@ func DetectIntent(query string) *Intent {
 
 	// Task-related
 	taskKeywords := []string{"할일", "할 일", "todo", "task", "일정", "해야 할"}
-	createKeywords := []string{"추가해줘", "만들어줘", "생성해줘", "등록해줘", "create ", "add ", "새로운"}
+	createKeywords := []string{"추가해줘", "만들어줘", "생성해줘", "등록해줘", "저장해줘", "저장해", "넣어줘", "기록해", "create ", "add ", "save ", "새로운"}
 
 	isTask := containsAny(q, taskKeywords)
 	isCreate := containsAny(q, createKeywords)

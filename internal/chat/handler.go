@@ -87,6 +87,23 @@ type ChatErrorPayload struct {
 	Error          string `json:"error"`
 }
 
+// ChatActionPayload is sent to present clickable options to the user.
+type ChatActionPayload struct {
+	ConversationID int64              `json:"conversation_id"`
+	MessageID      int64              `json:"message_id"`
+	ActionType     string             `json:"action_type"` // "select_workspace"
+	Title          string             `json:"title"`
+	Options        []ChatActionOption `json:"options"`
+	Context        map[string]interface{} `json:"context,omitempty"` // preserved and returned on select
+}
+
+// ChatActionOption is a clickable option in a chat:action message.
+type ChatActionOption struct {
+	ID    interface{} `json:"id"`
+	Label string      `json:"label"`
+	Value string      `json:"value,omitempty"`
+}
+
 // Handler processes chat-related WebSocket messages.
 type Handler struct {
 	skillRunner   *engine.SkillRunner
@@ -179,6 +196,9 @@ func (h *Handler) HandleMessage(msgType string, payload json.RawMessage) bool {
 	switch msgType {
 	case "chat:request":
 		h.handleChatRequest(payload)
+		return true
+	case "chat:action:select":
+		h.handleActionSelect(payload)
 		return true
 	default:
 		return false
@@ -434,6 +454,13 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		// 2. Auto-detect intent — skip if document refs already fetched
 		if !hasRefs {
 		if intent := DetectIntent(req.Query); intent != nil {
+			// Confirm-create intents: send chat:action with workspace options
+			if intent.Action == "confirm_create_document" || intent.Action == "confirm_create_task" {
+				if actionResp := h.handleCreateAction(ctx, req, intent); actionResp != nil {
+					return actionResp, nil
+				}
+			}
+
 			// Send immediate feedback: "데이터 조회 중..."
 			h.sendResponse("chat:delta", ChatDeltaPayload{
 				ConversationID: req.ConversationID,
@@ -1543,5 +1570,170 @@ func (h *Handler) saveChatMessage(convID, userID int64, sessionID, role, content
 		}); err != nil {
 			log.Printf("chat: save message error: %v", err)
 		}
+	}()
+}
+
+// handleCreateAction sends a chat:action message with workspace options for document/task creation.
+// Returns a response payload if action was sent (caller should return immediately), nil to continue normal flow.
+func (h *Handler) handleCreateAction(ctx context.Context, req *ChatRequestPayload, intent *Intent) *ChatResponsePayload {
+	if h.mcpClient == nil {
+		return nil
+	}
+	traceID, _ := ctx.Value("trace_id").(string)
+	log.Printf("[%s] action: fetching workspaces for %s", traceID, intent.Action)
+
+	wsResult, err := h.mcpClient.CallTool(ctx, "list_workspaces", map[string]interface{}{})
+	if err != nil {
+		log.Printf("[%s] action: workspace fetch failed: %v", traceID, err)
+		return nil
+	}
+
+	// Parse workspace list into options
+	wsData, _ := json.Marshal(wsResult)
+	var workspaces []struct {
+		ID   interface{} `json:"id"`
+		Name string      `json:"name"`
+	}
+	json.Unmarshal(wsData, &workspaces)
+
+	// If no parseable workspaces, try raw array
+	if len(workspaces) == 0 {
+		// Try parsing as generic array
+		var rawList []map[string]interface{}
+		json.Unmarshal(wsData, &rawList)
+		for _, w := range rawList {
+			workspaces = append(workspaces, struct {
+				ID   interface{} `json:"id"`
+				Name string      `json:"name"`
+			}{
+				ID:   w["id"],
+				Name: fmt.Sprintf("%v", w["name"]),
+			})
+		}
+	}
+
+	if len(workspaces) == 0 {
+		log.Printf("[%s] action: no workspaces found", traceID)
+		return nil
+	}
+
+	options := make([]ChatActionOption, 0, len(workspaces))
+	for _, ws := range workspaces {
+		options = append(options, ChatActionOption{
+			ID:    ws.ID,
+			Label: ws.Name,
+		})
+	}
+
+	itemType := "document"
+	title := "어떤 워크스페이스에 문서를 저장할까요?"
+	if intent.Action == "confirm_create_task" {
+		itemType = "task"
+		title = "어떤 워크스페이스에 할일을 저장할까요?"
+	}
+
+	// Extract content to save (remove create keywords from query)
+	content := extractTitle(req.Query)
+
+	h.sendResponse("chat:action", ChatActionPayload{
+		ConversationID: req.ConversationID,
+		MessageID:      req.MessageID,
+		ActionType:     "select_workspace",
+		Title:          title,
+		Options:        options,
+		Context: map[string]interface{}{
+			"item_type": itemType,
+			"content":   req.Query,
+			"title":     content,
+			"user_id":   req.UserID,
+		},
+	})
+
+	log.Printf("[%s] action: sent %d workspace options for %s", traceID, len(options), itemType)
+
+	return &ChatResponsePayload{
+		ConversationID: req.ConversationID,
+		MessageID:      req.MessageID,
+		Content:        title,
+		Model:          "system",
+		Role:           "assistant",
+	}
+}
+
+// handleActionSelect processes user's workspace selection and creates the document/task.
+func (h *Handler) handleActionSelect(payload json.RawMessage) {
+	var req struct {
+		ConversationID int64                  `json:"conversation_id"`
+		MessageID      int64                  `json:"message_id"`
+		ActionType     string                 `json:"action_type"`
+		Selected       interface{}            `json:"selected"` // workspace ID
+		Context        map[string]interface{} `json:"context"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		log.Printf("chat:action:select unmarshal error: %v", err)
+		return
+	}
+
+	log.Printf("action:select: type=%s selected=%v", req.ActionType, req.Selected)
+
+	if req.ActionType != "select_workspace" || h.mcpClient == nil {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		itemType, _ := req.Context["item_type"].(string)
+		content, _ := req.Context["content"].(string)
+		title, _ := req.Context["title"].(string)
+
+		var result interface{}
+		var err error
+
+		if itemType == "task" {
+			log.Printf("action:select: creating task in workspace %v", req.Selected)
+			result, err = h.mcpClient.CallTool(ctx, "create_task", map[string]interface{}{
+				"title":        title,
+				"workspace_id": req.Selected,
+			})
+		} else {
+			log.Printf("action:select: creating document in workspace %v", req.Selected)
+			result, err = h.mcpClient.CallTool(ctx, "create_document", map[string]interface{}{
+				"title":        title,
+				"content":      content,
+				"workspace_id": req.Selected,
+			})
+		}
+
+		if err != nil {
+			log.Printf("action:select: create failed: %v", err)
+			h.sendResponse("chat:response", ChatResponsePayload{
+				ConversationID: req.ConversationID,
+				MessageID:      req.MessageID,
+				Content:        fmt.Sprintf("저장에 실패했습니다: %v", err),
+				Model:          "system",
+				Role:           "assistant",
+			})
+			return
+		}
+
+		resultData, _ := json.Marshal(result)
+		log.Printf("action:select: created successfully: %s", truncateLog(string(resultData), 200))
+
+		emoji := "📄"
+		label := "문서"
+		if itemType == "task" {
+			emoji = "✅"
+			label = "할일"
+		}
+
+		h.sendResponse("chat:response", ChatResponsePayload{
+			ConversationID: req.ConversationID,
+			MessageID:      req.MessageID,
+			Content:        fmt.Sprintf("%s %s가 저장되었습니다: **%s**", emoji, label, title),
+			Model:          "system",
+			Role:           "assistant",
+		})
 	}()
 }
