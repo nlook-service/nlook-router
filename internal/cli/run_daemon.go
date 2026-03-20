@@ -37,7 +37,7 @@ import (
 )
 
 // Version is set by ldflags at build time, or defaults to dev.
-var Version = "0.2.59"
+var Version = "0.2.60"
 
 // RunDaemon starts the local HTTP server, heartbeat loop, WebSocket client, and SSH proxy.
 func RunDaemon(cfg *config.Config) error {

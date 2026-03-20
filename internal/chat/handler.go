@@ -450,25 +450,23 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		} // end !hasRefs
 	}
 
-	// qwen classifies every query (tracked in usage stats), all responses via Claude
+	// Classify complexity: simple → local model, complex → cloud model
 	localModel := h.findLocalModel(ctx, model)
 	complexity := h.classifyWithQwen(ctx, req.Query, localModel, tlog)
 
-	switch complexity {
-	default:
-		// noop — fall through to Claude
-	}
-
-	// All responses: Local model → Claude CLI → Gemini
-	if localModel != "" {
-		tlog("route: local %s (%s)", localModel, complexity)
-		resp, err := h.processChatOllama(ctx, req, localModel)
-		if err == nil {
-			return resp, nil
+	// simple → local model (gemma3), complex → Claude (high reasoning)
+	if complexity == "simple" {
+		if localModel != "" {
+			tlog("route: local %s (simple)", localModel)
+			resp, err := h.processChatOllama(ctx, req, localModel)
+			if err == nil {
+				return resp, nil
+			}
+			tlog("route: local %s failed: %v, escalating to Claude", localModel, err)
 		}
-		tlog("route: local %s failed: %v, trying Claude", localModel, err)
 	}
 
+	// Complex (or simple fallback): Claude → Gemini → local
 	claudePath := findClaude()
 	if claudePath != "" {
 		tlog("route: Claude Code CLI (%s)", complexity)
@@ -481,12 +479,17 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 
 	geminiClient := gemini.NewClient()
 	if geminiClient != nil {
-		tlog("route: Gemini Cloud (%s)", geminiClient.Model())
+		tlog("route: Gemini Cloud (%s) (%s)", geminiClient.Model(), complexity)
 		resp, err := h.processChatGemini(ctx, req, geminiClient)
 		if err == nil {
 			return resp, nil
 		}
 		tlog("route: Gemini failed: %v", err)
+	}
+
+	if complexity != "simple" && localModel != "" {
+		tlog("route: local %s (last resort)", localModel)
+		return h.processChatOllama(ctx, req, localModel)
 	}
 
 	return nil, fmt.Errorf("no LLM available: configure Ollama, Claude Code CLI, or Gemini")
@@ -1311,15 +1314,23 @@ func (h *Handler) classifyComplexity(ctx context.Context, query string, localMod
 	complexKeywords := []string{
 		"작성해", "써줘", "만들어", "분석해", "비교해", "요약해", "번역해",
 		"설명해", "자세히", "왜", "어떻게 하면",
+		"등록", "저장", "생성", "추가해", "넣어", "기록",
+		"문서", "할일", "할 일", "메모", "노트",
 		"SEO", "마케팅", "블로그", "리포트", "보고서", "코드",
 		"write", "analyze", "summarize", "translate", "explain",
 		"generate", "create", "draft", "compare", "how to",
+		"save", "register", "add", "document", "task", "note",
 	}
 	lower := strings.ToLower(classifyQuery)
 	for _, kw := range complexKeywords {
 		if strings.Contains(lower, strings.ToLower(kw)) {
 			return "complex"
 		}
+	}
+
+	// 2b. Long content (>500 chars) → complex (likely pasted web content or detailed request)
+	if len(classifyQuery) > 500 {
+		return "complex"
 	}
 
 	// 3. Keywords → simple
