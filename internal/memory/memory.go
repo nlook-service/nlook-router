@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nlook-service/nlook-router/internal/db"
 	"github.com/nlook-service/nlook-router/internal/tokenizer"
 )
 
@@ -71,6 +72,7 @@ type Store struct {
 	optimizer      MemoryOptimizer
 	factExtractor  *FactExtractor
 	optimizing     sync.Mutex // prevents concurrent optimization
+	db             db.DB      // optional: unified DB layer (nil = file-based)
 }
 
 // NewStore creates a new memory store.
@@ -109,6 +111,7 @@ func (s *Store) UpdateProfile(p UserProfile) {
 	p.UpdatedAt = time.Now()
 	s.profile = p
 	s.dirty = true
+	s.syncProfileToDB()
 }
 
 // LearnFact adds a learned fact about the user.
@@ -126,6 +129,7 @@ func (s *Store) LearnFact(fact string) {
 		s.facts = s.facts[len(s.facts)-50:] // Keep last 50
 	}
 	s.dirty = true
+	s.syncFactToDB(fact)
 }
 
 // GetFacts returns learned facts.
@@ -159,6 +163,7 @@ func (s *Store) SetConversationSummary(convID int64, summary string, msgCount in
 		delete(s.summaries, oldest)
 	}
 	s.dirty = true
+	s.syncSummaryToDB(s.summaries[convID])
 }
 
 // GetConversationSummary returns summary for a conversation.
@@ -278,6 +283,7 @@ func (s *Store) AddMemory(m UserMemory) {
 		s.totalTokens -= evicted.TokenCount
 	}
 	s.dirty = true
+	s.syncMemoryToDB(m)
 }
 
 // GetMemories returns all structured memories.
@@ -359,6 +365,8 @@ func (s *Store) OptimizeIfNeeded(ctx context.Context) error {
 	s.totalTokens = newTotal
 	s.dirty = true
 	s.mu.Unlock()
+
+	s.syncReplaceAllMemoriesToDB(optimized)
 
 	return nil
 }

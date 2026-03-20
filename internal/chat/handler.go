@@ -19,6 +19,7 @@ import (
 
 	"github.com/nlook-service/nlook-router/internal/apiclient"
 	"github.com/nlook-service/nlook-router/internal/cache"
+	"github.com/nlook-service/nlook-router/internal/db"
 	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/engine"
 	"github.com/nlook-service/nlook-router/internal/gemini"
@@ -100,6 +101,7 @@ type Handler struct {
 	sendWS        func(msg []byte)
 	sessions      *session.Store
 	tracer        *tracing.Collector
+	storage       db.DB // optional: for persisting chat messages locally
 }
 
 // SetLLMEngine sets the LLM engine (vLLM or Ollama).
@@ -138,6 +140,11 @@ func (h *Handler) SetSessionStore(s *session.Store) {
 // SetTracer sets the trace collector for recording chat events.
 func (h *Handler) SetTracer(t *tracing.Collector) {
 	h.tracer = t
+}
+
+// SetDB sets the unified DB for persisting chat messages locally.
+func (h *Handler) SetDB(d db.DB) {
+	h.storage = d
 }
 
 func (h *Handler) rebuildPromptBuilder() {
@@ -209,6 +216,9 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 		sess.Context.AddMessage("user", req.Query)
 	}
 
+	// Persist user message locally
+	h.saveChatMessage(req.ConversationID, req.UserID, req.SessionID, "user", req.Query, "", 0)
+
 	go func() {
 		startTime := time.Now()
 		ctx := context.WithValue(context.Background(), "trace_id", traceID)
@@ -272,6 +282,9 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 		if sess != nil {
 			sess.Context.AddMessage("assistant", resp.Content)
 		}
+
+		// Persist assistant message locally
+		h.saveChatMessage(req.ConversationID, req.UserID, req.SessionID, "assistant", resp.Content, resp.Model, resp.TokensUsed)
 
 		h.sendResponse("chat:response", resp)
 
@@ -1494,4 +1507,27 @@ func (h *Handler) processChatGemini(ctx context.Context, req *ChatRequestPayload
 		Content: fullText, Model: model, Role: "assistant",
 		TokensUsed: inTok + outTok,
 	}, nil
+}
+
+// saveChatMessage persists a chat message to the local DB (if configured).
+func (h *Handler) saveChatMessage(convID, userID int64, sessionID, role, content, model string, tokenCount int) {
+	if h.storage == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := h.storage.InsertChatMessage(ctx, &db.ChatMessage{
+			ConversationID: convID,
+			UserID:         userID,
+			SessionID:      sessionID,
+			Role:           role,
+			Content:        content,
+			Model:          model,
+			TokenCount:     tokenCount,
+			CreatedAt:      time.Now(),
+		}); err != nil {
+			log.Printf("chat: save message error: %v", err)
+		}
+	}()
 }

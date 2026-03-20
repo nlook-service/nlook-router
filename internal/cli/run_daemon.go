@@ -27,6 +27,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/ollama"
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/agentproxy"
+	"github.com/nlook-service/nlook-router/internal/db"
 	"github.com/nlook-service/nlook-router/internal/session"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
@@ -36,7 +37,7 @@ import (
 )
 
 // Version is set by ldflags at build time, or defaults to dev.
-var Version = "0.2.55"
+var Version = "0.2.58"
 
 // RunDaemon starts the local HTTP server, heartbeat loop, WebSocket client, and SSH proxy.
 func RunDaemon(cfg *config.Config) error {
@@ -132,10 +133,33 @@ func RunDaemon(cfg *config.Config) error {
 	// SSH proxy
 	sshProxy := sshproxy.NewProxy()
 
-	// Session store + tracing (shared across chat, agent, engine)
+	// Unified DB layer (optional, configured via config.yaml db.driver)
 	dataDir := config.ConfigDir()
-	sessionStore := session.NewStore(dataDir, session.DefaultTTL)
-	traceWriter := tracing.NewWriter(dataDir)
+	if cfg.DB.DataDir != "" {
+		dataDir = cfg.DB.DataDir
+	}
+	var storage db.DB
+	if cfg.DB.Driver != "" && cfg.DB.Driver != "file" {
+		var err error
+		storage, err = db.New(cfg.DB.Driver, dataDir)
+		if err != nil {
+			log.Printf("db: init %s failed: %v (falling back to file)", cfg.DB.Driver, err)
+		} else {
+			log.Printf("db: using %s driver (data_dir=%s)", cfg.DB.Driver, dataDir)
+			defer storage.Close()
+		}
+	}
+
+	// Session store + tracing (shared across chat, agent, engine)
+	var sessionStore *session.Store
+	var traceWriter *tracing.Writer
+	if storage != nil {
+		sessionStore = session.NewStoreWithDB(storage, session.DefaultTTL)
+		traceWriter = tracing.NewWriterWithDB(storage)
+	} else {
+		sessionStore = session.NewStore(dataDir, session.DefaultTTL)
+		traceWriter = tracing.NewWriter(dataDir)
+	}
 	traceCollector := tracing.NewCollector(traceWriter)
 	srv.SetSessionStore(sessionStore)
 	srv.SetTraceWriter(traceWriter)
@@ -224,7 +248,12 @@ func RunDaemon(cfg *config.Config) error {
 		srv.SetLLMEngine(llmEngine)
 
 		// Cache store for user data (documents, tasks)
-		cacheStore := cache.NewStore()
+		var cacheStore *cache.Store
+		if storage != nil {
+			cacheStore = cache.NewStoreWithDB(storage)
+		} else {
+			cacheStore = cache.NewStore()
+		}
 		syncHandler := cache.NewSyncHandler(cacheStore)
 
 		// Embedding vector store for semantic search
@@ -240,13 +269,21 @@ func RunDaemon(cfg *config.Config) error {
 		chatHandler := chat.NewHandler(skillRunner, func(msg []byte) {
 			wsClient.Send(msg)
 		}, cfg.APIKey, usageTracker)
-		memoryStore := memory.NewStore()
+		var memoryStore *memory.Store
+		if storage != nil {
+			memoryStore = memory.NewStoreWithDB(storage)
+		} else {
+			memoryStore = memory.NewStore()
+		}
 		// Wire LLM-based memory optimization (uses Ollama for compression & fact extraction)
 		if ollamaClient.IsRunning(context.Background()) {
 			aiModel := os.Getenv("NLOOK_AI_MODEL")
 			memoryStore.SetOptimizer(memory.NewSummarizeStrategy(ollamaClient, aiModel))
 			memoryStore.SetFactExtractor(memory.NewFactExtractor(ollamaClient, aiModel))
 			log.Printf("memory: LLM-based optimizer & fact extractor enabled")
+		}
+		if storage != nil {
+			chatHandler.SetDB(storage)
 		}
 		chatHandler.SetCacheStore(cacheStore)
 		chatHandler.SetVectorStore(vectorStore)

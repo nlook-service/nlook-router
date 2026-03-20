@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/nlook-service/nlook-router/internal/db"
 )
 
 const DefaultTTL = 24 * time.Hour
@@ -19,6 +21,7 @@ type Store struct {
 	filePath string
 	ttl      time.Duration
 	stopGC   chan struct{}
+	db       db.DB // optional: unified DB layer (nil = file-based)
 }
 
 // NewStore creates a session store. Pass empty dataDir to disable file persistence.
@@ -58,6 +61,7 @@ func (s *Store) Register(id string, sessionType SessionType, userID int64) *Sess
 		ExpiresAt: now.Add(s.ttl),
 	}
 	s.sessions[id] = sess
+	s.syncSessionToDB(sess)
 	return sess
 }
 
@@ -117,6 +121,7 @@ func (s *Store) Delete(id string) {
 	s.mu.Lock()
 	delete(s.sessions, id)
 	s.mu.Unlock()
+	s.syncDeleteSessionFromDB(id)
 }
 
 // Count returns the number of sessions (including expired not yet GC'd).
@@ -191,4 +196,5 @@ func (s *Store) gc() {
 	}
 	s.mu.Unlock()
 	s.Save()
+	s.syncDeleteExpiredFromDB()
 }

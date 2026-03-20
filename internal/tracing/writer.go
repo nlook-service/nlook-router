@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nlook-service/nlook-router/internal/db"
 )
 
 // Writer appends trace events to a JSONL file per session.
@@ -18,6 +20,7 @@ type Writer struct {
 	dir   string
 	mu    sync.Mutex
 	files map[string]*os.File
+	db    db.DB // optional: unified DB layer (nil = file-based)
 }
 
 // NewWriter creates a trace writer. Creates the traces directory if needed.
@@ -52,6 +55,7 @@ func (w *Writer) Write(event TraceEvent) error {
 	}
 
 	_, err = f.Write(data)
+	w.syncTraceToDB(event)
 	return err
 }
 

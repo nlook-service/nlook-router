@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nlook-service/nlook-router/internal/db"
 )
 
 // Document represents a cached document.
@@ -44,6 +46,7 @@ type Store struct {
 	tasks     map[int64]*Task
 	filePath  string
 	dirty     bool
+	db        db.DB // optional: unified DB layer (nil = file-based)
 }
 
 // NewStore creates a new cache store with file persistence.
@@ -76,6 +79,7 @@ func (s *Store) SetDocument(doc *Document) {
 	defer s.mu.Unlock()
 	s.documents[doc.ID] = doc
 	s.dirty = true
+	s.syncDocumentToDB(doc)
 }
 
 // RemoveDocument removes a document from cache.
@@ -84,6 +88,7 @@ func (s *Store) RemoveDocument(id int64) {
 	defer s.mu.Unlock()
 	delete(s.documents, id)
 	s.dirty = true
+	s.syncDeleteDocumentFromDB(id)
 }
 
 // SetTask adds or updates a task in cache.
@@ -92,6 +97,7 @@ func (s *Store) SetTask(task *Task) {
 	defer s.mu.Unlock()
 	s.tasks[task.ID] = task
 	s.dirty = true
+	s.syncTaskToDB(task)
 }
 
 // RemoveTask removes a task from cache.
@@ -100,6 +106,7 @@ func (s *Store) RemoveTask(id int64) {
 	defer s.mu.Unlock()
 	delete(s.tasks, id)
 	s.dirty = true
+	s.syncDeleteTaskFromDB(id)
 }
 
 // SearchDocuments finds documents matching the query by keyword.

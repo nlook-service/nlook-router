@@ -32,6 +32,15 @@ type Config struct {
 
 	// Agent terminal settings (Claude Code CLI execution in workspaces)
 	Agent AgentConfig `yaml:"agent,omitempty"`
+
+	// DB settings
+	DB DBConfig `yaml:"db,omitempty"`
+}
+
+// DBConfig holds settings for the unified storage layer.
+type DBConfig struct {
+	Driver  string `yaml:"driver,omitempty"`   // "file" (default) | "sqlite"
+	DataDir string `yaml:"data_dir,omitempty"` // default: ~/.nlook
 }
 
 // AgentConfig holds settings for the agent terminal proxy.
