@@ -274,6 +274,9 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 		}
 
 		h.sendResponse("chat:response", resp)
+
+		// Async post-response: memory learning & optimization
+		go h.postResponse(ctx, &req)
 	}()
 }
 
@@ -471,6 +474,35 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 	}
 
 	return nil, fmt.Errorf("no LLM available: configure Claude Code CLI, Gemini, or Ollama")
+}
+
+// postResponse runs async after chat response is sent: learns facts and optimizes memory.
+func (h *Handler) postResponse(ctx context.Context, req *ChatRequestPayload) {
+	if h.memoryStore == nil {
+		return
+	}
+
+	// Convert history to memory.HistoryMessage
+	msgs := make([]memory.HistoryMessage, len(req.History))
+	for i, m := range req.History {
+		msgs[i] = memory.HistoryMessage{Role: m.Role, Content: m.Content}
+	}
+
+	// 1. Extract facts from conversation via LLM
+	if err := h.memoryStore.LearnFromConversation(ctx, msgs); err != nil {
+		log.Printf("memory: learn failed: %v", err)
+	}
+
+	// 2. Update conversation summary for long conversations
+	if len(req.History) >= 4 {
+		summary := compressHistory(req.History)
+		h.memoryStore.SetConversationSummary(req.ConversationID, summary, len(req.History))
+	}
+
+	// 3. Optimize memory if token threshold exceeded
+	if err := h.memoryStore.OptimizeIfNeeded(ctx); err != nil {
+		log.Printf("memory: optimize failed: %v", err)
+	}
 }
 
 // processChatWithTools uses Anthropic API with tool_use for MCP integration.

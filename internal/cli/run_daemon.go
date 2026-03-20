@@ -241,6 +241,13 @@ func RunDaemon(cfg *config.Config) error {
 			wsClient.Send(msg)
 		}, cfg.APIKey, usageTracker)
 		memoryStore := memory.NewStore()
+		// Wire LLM-based memory optimization (uses Ollama for compression & fact extraction)
+		if ollamaClient.IsRunning(context.Background()) {
+			aiModel := os.Getenv("NLOOK_AI_MODEL")
+			memoryStore.SetOptimizer(memory.NewSummarizeStrategy(ollamaClient, aiModel))
+			memoryStore.SetFactExtractor(memory.NewFactExtractor(ollamaClient, aiModel))
+			log.Printf("memory: LLM-based optimizer & fact extractor enabled")
+		}
 		chatHandler.SetCacheStore(cacheStore)
 		chatHandler.SetVectorStore(vectorStore)
 		chatHandler.SetMemoryStore(memoryStore)

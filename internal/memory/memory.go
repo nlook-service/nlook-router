@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nlook-service/nlook-router/internal/tokenizer"
 )
 
 // UserProfile stores user's role, interests, preferences.
@@ -18,6 +21,23 @@ type UserProfile struct {
 	Lang      string   `json:"lang,omitempty"`      // preferred language
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+// UserMemory is a structured memory unit with metadata.
+type UserMemory struct {
+	ID         string    `json:"id"`
+	Memory     string    `json:"memory"`
+	Topics     []string  `json:"topics,omitempty"`
+	UserID     int64     `json:"user_id,omitempty"`
+	TokenCount int       `json:"token_count,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// OptimizeTokenThreshold is the total token count that triggers memory optimization.
+const OptimizeTokenThreshold = 4000
+
+// MaxMemories is the maximum number of structured memories to retain.
+const MaxMemories = 100
 
 // ConversationSummary stores a compressed summary of a conversation.
 type ConversationSummary struct {
@@ -30,20 +50,27 @@ type ConversationSummary struct {
 
 // memoryFile is the persistence format.
 type memoryFile struct {
-	Profile    UserProfile                    `json:"profile"`
-	Summaries  map[int64]*ConversationSummary `json:"summaries"`
-	Facts      []string                       `json:"facts,omitempty"` // Learned facts about user
-	SavedAt    time.Time                      `json:"saved_at"`
+	Profile     UserProfile                    `json:"profile"`
+	Summaries   map[int64]*ConversationSummary `json:"summaries"`
+	Facts       []string                       `json:"facts,omitempty"`       // legacy: kept for compat
+	Memories    []UserMemory                   `json:"memories,omitempty"`    // structured memories
+	SavedAt     time.Time                      `json:"saved_at"`
+	TotalTokens int                            `json:"total_tokens,omitempty"`
 }
 
 // Store provides long-term memory persistence.
 type Store struct {
-	mu        sync.RWMutex
-	profile   UserProfile
-	summaries map[int64]*ConversationSummary
-	facts     []string
-	filePath  string
-	dirty     bool
+	mu             sync.RWMutex
+	profile        UserProfile
+	summaries      map[int64]*ConversationSummary
+	facts          []string
+	memories       []UserMemory
+	totalTokens    int
+	filePath       string
+	dirty          bool
+	optimizer      MemoryOptimizer
+	factExtractor  *FactExtractor
+	optimizing     sync.Mutex // prevents concurrent optimization
 }
 
 // NewStore creates a new memory store.
@@ -187,8 +214,16 @@ func (s *Store) BuildPromptContext(convID int64) string {
 		}
 	}
 
-	// Learned Facts
-	if len(s.facts) > 0 {
+	// Structured Memories (preferred over legacy facts)
+	if len(s.memories) > 0 {
+		sb.WriteString("\n[Known Context About User]\n")
+		for _, m := range s.memories {
+			sb.WriteString("- " + m.Memory + "\n")
+		}
+	}
+
+	// Legacy facts (only if no structured memories)
+	if len(s.memories) == 0 && len(s.facts) > 0 {
 		sb.WriteString("\n[Known Facts About User]\n")
 		for _, f := range s.facts {
 			sb.WriteString("- " + f + "\n")
@@ -204,6 +239,146 @@ func (s *Store) BuildPromptContext(convID int64) string {
 	}
 
 	return sb.String()
+}
+
+// SetOptimizer sets the memory optimization strategy.
+func (s *Store) SetOptimizer(opt MemoryOptimizer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.optimizer = opt
+}
+
+// SetFactExtractor sets the LLM-based fact extractor.
+func (s *Store) SetFactExtractor(fe *FactExtractor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.factExtractor = fe
+}
+
+// AddMemory adds a structured memory, deduplicating by content similarity.
+func (s *Store) AddMemory(m UserMemory) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Simple dedup: skip if memory text already exists
+	lower := strings.ToLower(m.Memory)
+	for _, existing := range s.memories {
+		if strings.ToLower(existing.Memory) == lower {
+			return
+		}
+	}
+	if m.TokenCount == 0 {
+		m.TokenCount = tokenizer.EstimateTokens(m.Memory)
+	}
+	s.memories = append(s.memories, m)
+	s.totalTokens += m.TokenCount
+	// Evict oldest if over limit
+	if len(s.memories) > MaxMemories {
+		evicted := s.memories[0]
+		s.memories = s.memories[1:]
+		s.totalTokens -= evicted.TokenCount
+	}
+	s.dirty = true
+}
+
+// GetMemories returns all structured memories.
+func (s *Store) GetMemories() []UserMemory {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]UserMemory, len(s.memories))
+	copy(result, s.memories)
+	return result
+}
+
+// TotalTokens returns the cached total token count of all memories + summaries.
+func (s *Store) TotalTokens() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.totalTokens
+}
+
+// LearnFromConversation extracts facts from conversation using LLM and stores them.
+func (s *Store) LearnFromConversation(ctx context.Context, messages []HistoryMessage) error {
+	s.mu.RLock()
+	fe := s.factExtractor
+	s.mu.RUnlock()
+
+	if fe == nil {
+		return nil
+	}
+
+	facts, err := fe.Extract(ctx, messages)
+	if err != nil {
+		return err
+	}
+	for _, f := range facts {
+		s.AddMemory(f)
+	}
+	return nil
+}
+
+// OptimizeIfNeeded checks token threshold and runs optimizer if exceeded.
+func (s *Store) OptimizeIfNeeded(ctx context.Context) error {
+	s.mu.RLock()
+	opt := s.optimizer
+	total := s.totalTokens
+	memCount := len(s.memories)
+	s.mu.RUnlock()
+
+	if opt == nil || total < OptimizeTokenThreshold || memCount < 2 {
+		return nil
+	}
+
+	// Prevent concurrent optimization
+	if !s.optimizing.TryLock() {
+		return nil
+	}
+	defer s.optimizing.Unlock()
+
+	// Re-check under lock
+	s.mu.RLock()
+	memories := make([]UserMemory, len(s.memories))
+	copy(memories, s.memories)
+	s.mu.RUnlock()
+
+	optimized, err := opt.Optimize(ctx, memories)
+	if err != nil {
+		return err
+	}
+
+	// Calculate new total
+	newTotal := 0
+	for _, m := range optimized {
+		if m.TokenCount == 0 {
+			m.TokenCount = tokenizer.EstimateTokens(m.Memory)
+		}
+		newTotal += m.TokenCount
+	}
+
+	s.mu.Lock()
+	s.memories = optimized
+	s.totalTokens = newTotal
+	s.dirty = true
+	s.mu.Unlock()
+
+	return nil
+}
+
+// recalcTotalTokens recalculates the total token count from all sources.
+func (s *Store) recalcTotalTokens() {
+	total := 0
+	for i := range s.memories {
+		if s.memories[i].TokenCount == 0 {
+			s.memories[i].TokenCount = tokenizer.EstimateTokens(s.memories[i].Memory)
+		}
+		total += s.memories[i].TokenCount
+	}
+	for _, sum := range s.summaries {
+		total += tokenizer.EstimateTokens(sum.Summary)
+	}
+	for _, f := range s.facts {
+		total += tokenizer.EstimateTokens(f)
+	}
+	s.totalTokens = total
 }
 
 // Save persists to file.
@@ -228,15 +403,20 @@ func (s *Store) loadFromFile() {
 		s.summaries = mf.Summaries
 	}
 	s.facts = mf.Facts
-	log.Printf("memory: loaded profile + %d summaries + %d facts", len(s.summaries), len(s.facts))
+	s.memories = mf.Memories
+	s.recalcTotalTokens()
+	log.Printf("memory: loaded profile + %d summaries + %d facts + %d memories (%d tokens)",
+		len(s.summaries), len(s.facts), len(s.memories), s.totalTokens)
 }
 
 func (s *Store) saveToFile() {
 	mf := memoryFile{
-		Profile:   s.profile,
-		Summaries: s.summaries,
-		Facts:     s.facts,
-		SavedAt:   time.Now(),
+		Profile:     s.profile,
+		Summaries:   s.summaries,
+		Facts:       s.facts,
+		Memories:    s.memories,
+		SavedAt:     time.Now(),
+		TotalTokens: s.totalTokens,
 	}
 	data, err := json.MarshalIndent(mf, "", "  ")
 	if err != nil {

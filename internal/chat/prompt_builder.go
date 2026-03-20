@@ -146,23 +146,3 @@ func (pb *PromptBuilder) BuildHistory(history []HistoryMessage) []ollama.Message
 	return entries
 }
 
-// LearnFromConversation extracts facts from the conversation.
-func (pb *PromptBuilder) LearnFromConversation(messages []HistoryMessage) {
-	if pb.memoryStore == nil {
-		return
-	}
-	// Simple heuristic: detect self-introduction patterns
-	for _, m := range messages {
-		if m.Role != "user" {
-			continue
-		}
-		content := strings.ToLower(m.Content)
-		// Detect role mentions
-		if strings.Contains(content, "개발자") || strings.Contains(content, "developer") {
-			pb.memoryStore.UpdateProfile(memory.UserProfile{Role: "developer"})
-		}
-		if strings.Contains(content, "디자이너") || strings.Contains(content, "designer") {
-			pb.memoryStore.UpdateProfile(memory.UserProfile{Role: "designer"})
-		}
-	}
-}
