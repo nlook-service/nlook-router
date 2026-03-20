@@ -459,7 +459,16 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		// noop — fall through to Claude
 	}
 
-	// All responses: Claude CLI → Gemini → Ollama (qwen = classifier only, not responder)
+	// All responses: Local model → Claude CLI → Gemini
+	if localModel != "" {
+		tlog("route: local %s (%s)", localModel, complexity)
+		resp, err := h.processChatOllama(ctx, req, localModel)
+		if err == nil {
+			return resp, nil
+		}
+		tlog("route: local %s failed: %v, trying Claude", localModel, err)
+	}
+
 	claudePath := findClaude()
 	if claudePath != "" {
 		tlog("route: Claude Code CLI (%s)", complexity)
@@ -480,13 +489,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		tlog("route: Gemini failed: %v", err)
 	}
 
-	// Last resort: local model
-	if localModel != "" {
-		tlog("route: local %s (last resort)", localModel)
-		return h.processChatOllama(ctx, req, localModel)
-	}
-
-	return nil, fmt.Errorf("no LLM available: configure Claude Code CLI, Gemini, or Ollama")
+	return nil, fmt.Errorf("no LLM available: configure Ollama, Claude Code CLI, or Gemini")
 }
 
 // postResponse runs async after chat response is sent: learns facts and optimizes memory.

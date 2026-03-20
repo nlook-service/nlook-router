@@ -93,13 +93,14 @@ func (h *SyncHandler) handleDocumentDelete(payload json.RawMessage) {
 
 func (h *SyncHandler) handleTaskSync(payload json.RawMessage) {
 	var task struct {
-		ID        int64  `json:"id"`
-		Title     string `json:"title"`
-		Status    string `json:"status"`
-		Priority  string `json:"priority"`
-		Notes     string `json:"notes"`
-		DueDate   string `json:"due_date"`
-		UpdatedAt string `json:"updated_at"`
+		ID            int64  `json:"id"`
+		Title         string `json:"title"`
+		Status        string `json:"status"`
+		Priority      string `json:"priority"`
+		Notes         string `json:"notes"`
+		DueDate       string `json:"due_date"`
+		EmbeddingText string `json:"embedding_text"`
+		UpdatedAt     string `json:"updated_at"`
 	}
 	if err := json.Unmarshal(payload, &task); err != nil {
 		log.Printf("sync:task unmarshal error: %v", err)
@@ -119,7 +120,12 @@ func (h *SyncHandler) handleTaskSync(payload json.RawMessage) {
 	log.Printf("sync: cached task id=%d title=%s status=%s", task.ID, task.Title, task.Status)
 
 	if h.vectorStore != nil {
-		go h.vectorStore.Upsert(context.Background(), "task", task.ID, task.Title, task.Notes)
+		// Use embedding_text (title+notes+entries) if available, fallback to notes
+		content := task.EmbeddingText
+		if content == "" {
+			content = task.Notes
+		}
+		go h.vectorStore.Upsert(context.Background(), "task", task.ID, task.Title, content)
 	}
 }
 
@@ -147,13 +153,14 @@ type BulkSyncPayload struct {
 		UpdatedAt string   `json:"updated_at"`
 	} `json:"documents"`
 	Tasks []struct {
-		ID        int64  `json:"id"`
-		Title     string `json:"title"`
-		Status    string `json:"status"`
-		Priority  string `json:"priority"`
-		Notes     string `json:"notes"`
-		DueDate   string `json:"due_date"`
-		UpdatedAt string `json:"updated_at"`
+		ID            int64  `json:"id"`
+		Title         string `json:"title"`
+		Status        string `json:"status"`
+		Priority      string `json:"priority"`
+		Notes         string `json:"notes"`
+		DueDate       string `json:"due_date"`
+		EmbeddingText string `json:"embedding_text"`
+		UpdatedAt     string `json:"updated_at"`
 	} `json:"tasks"`
 }
 
@@ -170,6 +177,9 @@ func (h *SyncHandler) handleBulkSync(payload json.RawMessage) {
 			ID: d.ID, Title: d.Title, Content: d.Content,
 			Tags: d.Tags, UpdatedAt: updatedAt,
 		})
+		if h.vectorStore != nil {
+			go h.vectorStore.Upsert(context.Background(), "document", d.ID, d.Title, d.Content)
+		}
 	}
 	for _, t := range bulk.Tasks {
 		updatedAt, _ := time.Parse(time.RFC3339, t.UpdatedAt)
@@ -178,6 +188,13 @@ func (h *SyncHandler) handleBulkSync(payload json.RawMessage) {
 			Priority: t.Priority, Notes: t.Notes, DueDate: t.DueDate,
 			UpdatedAt: updatedAt,
 		})
+		if h.vectorStore != nil {
+			content := t.EmbeddingText
+			if content == "" {
+				content = t.Notes
+			}
+			go h.vectorStore.Upsert(context.Background(), "task", t.ID, t.Title, content)
+		}
 	}
 	log.Printf("sync: bulk loaded %d documents, %d tasks", len(bulk.Documents), len(bulk.Tasks))
 }

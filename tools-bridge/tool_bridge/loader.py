@@ -4,7 +4,7 @@
 필요 시 환경 설정(환경 변수·패키지 설치) 가이드를 참고하면 됩니다.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # Agno public API only
 from agno.tools import Toolkit
@@ -141,7 +141,7 @@ AGNO_TOOLKITS: list[tuple[str, str]] = [
 ]
 
 
-def _load_one_toolkit(module_path: str, class_name: str) -> Toolkit | None:
+def _load_one_toolkit(module_path: str, class_name: str) -> "Optional[Toolkit]":
     """Import and instantiate one toolkit. Returns None on any failure (에러 나는 항목은 제외)."""
     try:
         mod = __import__(f"agno.tools.{module_path}", fromlist=[class_name])
