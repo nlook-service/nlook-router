@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nlook-service/nlook-router/internal/eval"
 	_ "modernc.org/sqlite"
 )
 
@@ -141,6 +142,58 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_conv ON chat_messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_chat_user ON chat_messages(user_id);
+
+CREATE TABLE IF NOT EXISTS eval_sets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    target_type TEXT NOT NULL DEFAULT 'chat',
+    model TEXT DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS eval_cases (
+    id TEXT PRIMARY KEY,
+    eval_set_id TEXT NOT NULL,
+    input TEXT NOT NULL,
+    expected_output TEXT NOT NULL,
+    context TEXT DEFAULT '',
+    metadata TEXT DEFAULT '{}',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_cases_set ON eval_cases(eval_set_id);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id TEXT PRIMARY KEY,
+    eval_set_id TEXT NOT NULL,
+    evaluator_model TEXT NOT NULL,
+    target_model TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    num_iterations INTEGER NOT NULL DEFAULT 1,
+    total_cases INTEGER NOT NULL DEFAULT 0,
+    completed_cases INTEGER NOT NULL DEFAULT 0,
+    avg_score REAL DEFAULT 0,
+    std_dev REAL DEFAULT 0,
+    started_at INTEGER NOT NULL,
+    completed_at INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS eval_results (
+    id TEXT PRIMARY KEY,
+    eval_run_id TEXT NOT NULL,
+    eval_case_id TEXT NOT NULL,
+    iteration INTEGER NOT NULL DEFAULT 1,
+    actual_output TEXT DEFAULT '',
+    accuracy_score INTEGER DEFAULT 0,
+    accuracy_reason TEXT DEFAULT '',
+    latency_ms INTEGER DEFAULT 0,
+    tokens_in INTEGER DEFAULT 0,
+    tokens_out INTEGER DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(eval_run_id);
+CREATE INDEX IF NOT EXISTS idx_eval_results_case ON eval_results(eval_case_id);
 `
 
 // --- helpers ---
@@ -760,6 +813,177 @@ func (s *SQLiteDB) ListChatMessages(ctx context.Context, convID int64, limit int
 		}
 		msg.CreatedAt = fromEpoch(createdAt)
 		result = append(result, &msg)
+	}
+	return result, nil
+}
+
+// --- Eval ---
+
+func (s *SQLiteDB) UpsertEvalSet(ctx context.Context, set *eval.EvalSet) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO eval_sets (id, name, description, target_type, model, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name, description=excluded.description, target_type=excluded.target_type,
+			model=excluded.model, updated_at=excluded.updated_at`,
+		set.ID, set.Name, set.Description, set.TargetType, set.Model,
+		toEpoch(set.CreatedAt), toEpoch(set.UpdatedAt))
+	return err
+}
+
+func (s *SQLiteDB) GetEvalSet(ctx context.Context, id string) (*eval.EvalSet, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, description, target_type, model, created_at, updated_at FROM eval_sets WHERE id=?`, id)
+	var set eval.EvalSet
+	var createdAt, updatedAt int64
+	err := row.Scan(&set.ID, &set.Name, &set.Description, &set.TargetType, &set.Model, &createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	set.CreatedAt = fromEpoch(createdAt)
+	set.UpdatedAt = fromEpoch(updatedAt)
+	return &set, nil
+}
+
+func (s *SQLiteDB) ListEvalSets(ctx context.Context) ([]*eval.EvalSet, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, target_type, model, created_at, updated_at FROM eval_sets ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*eval.EvalSet
+	for rows.Next() {
+		var set eval.EvalSet
+		var createdAt, updatedAt int64
+		if err := rows.Scan(&set.ID, &set.Name, &set.Description, &set.TargetType, &set.Model, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		set.CreatedAt = fromEpoch(createdAt)
+		set.UpdatedAt = fromEpoch(updatedAt)
+		result = append(result, &set)
+	}
+	return result, nil
+}
+
+func (s *SQLiteDB) DeleteEvalSet(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM eval_cases WHERE eval_set_id=?`, id)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM eval_sets WHERE id=?`, id)
+	return err
+}
+
+func (s *SQLiteDB) InsertEvalCase(ctx context.Context, c *eval.EvalCase) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO eval_cases (id, eval_set_id, input, expected_output, context, metadata, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.EvalSetID, c.Input, c.ExpectedOutput, c.Context, c.Metadata, toEpoch(c.CreatedAt))
+	return err
+}
+
+func (s *SQLiteDB) ListEvalCases(ctx context.Context, evalSetID string) ([]*eval.EvalCase, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, eval_set_id, input, expected_output, context, metadata, created_at FROM eval_cases WHERE eval_set_id=? ORDER BY created_at`, evalSetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*eval.EvalCase
+	for rows.Next() {
+		var c eval.EvalCase
+		var createdAt int64
+		if err := rows.Scan(&c.ID, &c.EvalSetID, &c.Input, &c.ExpectedOutput, &c.Context, &c.Metadata, &createdAt); err != nil {
+			return nil, err
+		}
+		c.CreatedAt = fromEpoch(createdAt)
+		result = append(result, &c)
+	}
+	return result, nil
+}
+
+func (s *SQLiteDB) DeleteEvalCase(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM eval_cases WHERE id=?`, id)
+	return err
+}
+
+func (s *SQLiteDB) InsertEvalRun(ctx context.Context, run *eval.EvalRun) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO eval_runs (id, eval_set_id, evaluator_model, target_model, status, num_iterations, total_cases, completed_cases, avg_score, std_dev, started_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.EvalSetID, run.EvaluatorModel, run.TargetModel, run.Status, run.NumIterations,
+		run.TotalCases, run.CompletedCases, run.AvgScore, run.StdDev,
+		toEpoch(run.StartedAt), toEpoch(run.CompletedAt))
+	return err
+}
+
+func (s *SQLiteDB) UpdateEvalRun(ctx context.Context, run *eval.EvalRun) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE eval_runs SET status=?, completed_cases=?, avg_score=?, std_dev=?, completed_at=? WHERE id=?`,
+		run.Status, run.CompletedCases, run.AvgScore, run.StdDev, toEpoch(run.CompletedAt), run.ID)
+	return err
+}
+
+func (s *SQLiteDB) GetEvalRun(ctx context.Context, id string) (*eval.EvalRun, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, eval_set_id, evaluator_model, target_model, status, num_iterations, total_cases, completed_cases, avg_score, std_dev, started_at, completed_at FROM eval_runs WHERE id=?`, id)
+	var run eval.EvalRun
+	var startedAt, completedAt int64
+	err := row.Scan(&run.ID, &run.EvalSetID, &run.EvaluatorModel, &run.TargetModel, &run.Status, &run.NumIterations, &run.TotalCases, &run.CompletedCases, &run.AvgScore, &run.StdDev, &startedAt, &completedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	run.StartedAt = fromEpoch(startedAt)
+	run.CompletedAt = fromEpoch(completedAt)
+	return &run, nil
+}
+
+func (s *SQLiteDB) ListEvalRuns(ctx context.Context, evalSetID string) ([]*eval.EvalRun, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, eval_set_id, evaluator_model, target_model, status, num_iterations, total_cases, completed_cases, avg_score, std_dev, started_at, completed_at FROM eval_runs WHERE eval_set_id=? ORDER BY started_at DESC`, evalSetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*eval.EvalRun
+	for rows.Next() {
+		var run eval.EvalRun
+		var startedAt, completedAt int64
+		if err := rows.Scan(&run.ID, &run.EvalSetID, &run.EvaluatorModel, &run.TargetModel, &run.Status, &run.NumIterations, &run.TotalCases, &run.CompletedCases, &run.AvgScore, &run.StdDev, &startedAt, &completedAt); err != nil {
+			return nil, err
+		}
+		run.StartedAt = fromEpoch(startedAt)
+		run.CompletedAt = fromEpoch(completedAt)
+		result = append(result, &run)
+	}
+	return result, nil
+}
+
+func (s *SQLiteDB) InsertEvalResult(ctx context.Context, r *eval.EvalResult) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO eval_results (id, eval_run_id, eval_case_id, iteration, actual_output, accuracy_score, accuracy_reason, latency_ms, tokens_in, tokens_out, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.EvalRunID, r.EvalCaseID, r.Iteration, r.ActualOutput, r.AccuracyScore, r.AccuracyReason, r.LatencyMs, r.TokensIn, r.TokensOut, toEpoch(r.CreatedAt))
+	return err
+}
+
+func (s *SQLiteDB) ListEvalResults(ctx context.Context, evalRunID string) ([]*eval.EvalResult, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, eval_run_id, eval_case_id, iteration, actual_output, accuracy_score, accuracy_reason, latency_ms, tokens_in, tokens_out, created_at FROM eval_results WHERE eval_run_id=? ORDER BY created_at`, evalRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*eval.EvalResult
+	for rows.Next() {
+		var r eval.EvalResult
+		var createdAt int64
+		if err := rows.Scan(&r.ID, &r.EvalRunID, &r.EvalCaseID, &r.Iteration, &r.ActualOutput, &r.AccuracyScore, &r.AccuracyReason, &r.LatencyMs, &r.TokensIn, &r.TokensOut, &createdAt); err != nil {
+			return nil, err
+		}
+		r.CreatedAt = fromEpoch(createdAt)
+		result = append(result, &r)
 	}
 	return result, nil
 }

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nlook-service/nlook-router/internal/eval"
 )
 
 // FileDB implements DB using existing JSON file format.
@@ -592,6 +594,60 @@ func (f *FileDB) ListChatMessages(ctx context.Context, convID int64, limit int) 
 		result = result[len(result)-limit:]
 	}
 	return result, nil
+}
+
+// --- Eval (not supported in file mode) ---
+
+func (f *FileDB) UpsertEvalSet(_ context.Context, _ *eval.EvalSet) error {
+	return fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) GetEvalSet(_ context.Context, _ string) (*eval.EvalSet, error) {
+	return nil, fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) ListEvalSets(_ context.Context) ([]*eval.EvalSet, error) {
+	return nil, fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) DeleteEvalSet(_ context.Context, _ string) error {
+	return fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) InsertEvalCase(_ context.Context, _ *eval.EvalCase) error {
+	return fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) ListEvalCases(_ context.Context, _ string) ([]*eval.EvalCase, error) {
+	return nil, fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) DeleteEvalCase(_ context.Context, _ string) error {
+	return fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) InsertEvalRun(_ context.Context, _ *eval.EvalRun) error {
+	return fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) UpdateEvalRun(_ context.Context, _ *eval.EvalRun) error {
+	return fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) GetEvalRun(_ context.Context, _ string) (*eval.EvalRun, error) {
+	return nil, fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) ListEvalRuns(_ context.Context, _ string) ([]*eval.EvalRun, error) {
+	return nil, fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) InsertEvalResult(_ context.Context, _ *eval.EvalResult) error {
+	return fmt.Errorf("eval: not supported in file mode")
+}
+
+func (f *FileDB) ListEvalResults(_ context.Context, _ string) ([]*eval.EvalResult, error) {
+	return nil, fmt.Errorf("eval: not supported in file mode")
 }
 
 // --- Lifecycle ---

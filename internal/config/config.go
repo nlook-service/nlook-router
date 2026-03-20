@@ -35,12 +35,23 @@ type Config struct {
 
 	// DB settings
 	DB DBConfig `yaml:"db,omitempty"`
+
+	// Eval settings
+	Eval EvalConfig `yaml:"eval,omitempty"`
 }
 
 // DBConfig holds settings for the unified storage layer.
 type DBConfig struct {
 	Driver  string `yaml:"driver,omitempty"`   // "file" (default) | "sqlite"
 	DataDir string `yaml:"data_dir,omitempty"` // default: ~/.nlook
+}
+
+// EvalConfig holds settings for the evaluation framework.
+type EvalConfig struct {
+	EvaluatorModel    string `yaml:"evaluator_model,omitempty"`    // model used to score outputs
+	DefaultIterations int    `yaml:"default_iterations,omitempty"` // default iterations per case
+	MaxIterations     int    `yaml:"max_iterations,omitempty"`     // max allowed iterations
+	TimeoutSeconds    int    `yaml:"timeout_seconds,omitempty"`    // per-case timeout
 }
 
 // AgentConfig holds settings for the agent terminal proxy.
@@ -96,6 +107,15 @@ func Load(path string) (*Config, error) {
 	}
 	if len(c.Agent.AllowedCommands) == 0 {
 		c.Agent.AllowedCommands = defaults.AllowedCommands
+	}
+	if c.Eval.DefaultIterations == 0 {
+		c.Eval.DefaultIterations = 1
+	}
+	if c.Eval.MaxIterations == 0 {
+		c.Eval.MaxIterations = 10
+	}
+	if c.Eval.TimeoutSeconds == 0 {
+		c.Eval.TimeoutSeconds = 120
 	}
 	return &c, nil
 }

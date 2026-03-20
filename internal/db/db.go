@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"time"
+
+	"github.com/nlook-service/nlook-router/internal/eval"
 )
 
 // DB is the unified storage interface for the router.
@@ -57,6 +59,24 @@ type DB interface {
 	// --- Chat Messages (local AI conversation history) ---
 	InsertChatMessage(ctx context.Context, msg *ChatMessage) error
 	ListChatMessages(ctx context.Context, convID int64, limit int) ([]*ChatMessage, error)
+
+	// --- Eval ---
+	UpsertEvalSet(ctx context.Context, set *eval.EvalSet) error
+	GetEvalSet(ctx context.Context, id string) (*eval.EvalSet, error)
+	ListEvalSets(ctx context.Context) ([]*eval.EvalSet, error)
+	DeleteEvalSet(ctx context.Context, id string) error
+
+	InsertEvalCase(ctx context.Context, c *eval.EvalCase) error
+	ListEvalCases(ctx context.Context, evalSetID string) ([]*eval.EvalCase, error)
+	DeleteEvalCase(ctx context.Context, id string) error
+
+	InsertEvalRun(ctx context.Context, run *eval.EvalRun) error
+	UpdateEvalRun(ctx context.Context, run *eval.EvalRun) error
+	GetEvalRun(ctx context.Context, id string) (*eval.EvalRun, error)
+	ListEvalRuns(ctx context.Context, evalSetID string) ([]*eval.EvalRun, error)
+
+	InsertEvalResult(ctx context.Context, result *eval.EvalResult) error
+	ListEvalResults(ctx context.Context, evalRunID string) ([]*eval.EvalResult, error)
 
 	// --- Lifecycle ---
 	Migrate(ctx context.Context) error
