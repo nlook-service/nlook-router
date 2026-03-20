@@ -57,6 +57,8 @@ type Client struct {
 	OnRunDispatch func(payload RunDispatchPayload)
 	// Callback for incoming run cancel messages
 	OnRunCancel func(runID int64)
+	// Callback for session end messages
+	OnSessionEnd func(sessionID string)
 	// Callback for incoming messages (generic — for SSH etc.)
 	OnMessage func(msgType string, payload json.RawMessage)
 
@@ -349,6 +351,17 @@ func (c *Client) handleMessage(data []byte) {
 		}
 		if c.OnRunCancel != nil {
 			c.OnRunCancel(payload.RunID)
+		}
+	case "session:end":
+		var payload struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			log.Printf("ws_client: unmarshal session:end: %v", err)
+			return
+		}
+		if c.OnSessionEnd != nil {
+			c.OnSessionEnd(payload.SessionID)
 		}
 	default:
 		// Forward to generic handler (for SSH messages etc.)

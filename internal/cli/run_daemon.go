@@ -27,8 +27,10 @@ import (
 	"github.com/nlook-service/nlook-router/internal/ollama"
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/agentproxy"
+	"github.com/nlook-service/nlook-router/internal/session"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
+	"github.com/nlook-service/nlook-router/internal/tracing"
 	"github.com/nlook-service/nlook-router/internal/usage"
 	"github.com/nlook-service/nlook-router/internal/ws"
 )
@@ -130,6 +132,15 @@ func RunDaemon(cfg *config.Config) error {
 	// SSH proxy
 	sshProxy := sshproxy.NewProxy()
 
+	// Session store + tracing (shared across chat, agent, engine)
+	dataDir := config.ConfigDir()
+	sessionStore := session.NewStore(dataDir, session.DefaultTTL)
+	traceWriter := tracing.NewWriter(dataDir)
+	traceCollector := tracing.NewCollector(traceWriter)
+	srv.SetSessionStore(sessionStore)
+	srv.SetTraceWriter(traceWriter)
+	eng.SetTracer(traceCollector)
+
 	// Agent proxy (Claude Code CLI execution in workspaces)
 	agentManager := agentproxy.NewSessionManager(ctx, agentproxy.SessionConfig{
 		Workspaces:      cfg.Agent.Workspaces,
@@ -157,6 +168,47 @@ func RunDaemon(cfg *config.Config) error {
 		wsClient.OnRunCancel = func(runID int64) {
 			log.Printf("ws: received run cancel: run_id=%d", runID)
 			execService.CancelRun(runID)
+		}
+
+		// Wire session:end → session cleanup + summary to cloud
+		wsClient.OnSessionEnd = func(sessionID string) {
+			log.Printf("ws: session:end received: %s", sessionID)
+			sess := sessionStore.Get(sessionID)
+			if sess == nil {
+				return
+			}
+
+			// Collect trace stats
+			events, _ := traceWriter.ReadEvents(sessionID)
+			traceCount := len(events)
+
+			// Build summary
+			summary := map[string]interface{}{
+				"session_id":  sessionID,
+				"type":        string(sess.Type),
+				"user_id":     sess.UserID,
+				"agent_ids":   sess.AgentIDs,
+				"run_ids":     sess.RunIDs,
+				"trace_count": traceCount,
+				"duration_ms": time.Since(sess.CreatedAt).Milliseconds(),
+			}
+			if sess.Context != nil {
+				summary["message_count"] = len(sess.Context.Messages)
+				summary["agent_result_count"] = len(sess.Context.AgentResults)
+				summary["summary"] = sess.Context.Summary
+			}
+
+			// Send summary to cloud
+			_ = wsClient.SendMessage("session:summary", summary)
+
+			// Emit trace event for session end
+			traceCollector.Emit(tracing.NewEvent(sessionID, tracing.EventSessionEnd, "session:end").
+				WithMeta(map[string]interface{}{"trace_count": traceCount}))
+
+			// Cleanup local session (trace files preserved)
+			sess.Complete()
+			sessionStore.Delete(sessionID)
+			log.Printf("ws: session %s completed (traces=%d)", sessionID, traceCount)
 		}
 
 		// LLM engine (auto-detect vLLM or Ollama)
@@ -193,6 +245,8 @@ func RunDaemon(cfg *config.Config) error {
 		chatHandler.SetVectorStore(vectorStore)
 		chatHandler.SetMemoryStore(memoryStore)
 		chatHandler.SetLLMEngine(llmEngine)
+		chatHandler.SetSessionStore(sessionStore)
+		chatHandler.SetTracer(traceCollector)
 		if toolsBridge != nil {
 			chatHandler.SetToolExecutor(toolsBridge)
 			log.Printf("chat: built-in tools connected (web_search, code_interpreter, etc.)")
@@ -208,6 +262,8 @@ func RunDaemon(cfg *config.Config) error {
 			wsClient.Send(msg)
 		})
 		agentHandler.SetUsageRecorder(agentUsageAdapter{tracker: usageTracker})
+		agentHandler.SetSessionStore(sessionStore)
+		agentHandler.SetTracer(traceCollector)
 
 		// Route messages: sync → chat → agent → SSH
 		wsClient.OnMessage = func(msgType string, payload json.RawMessage) {
@@ -255,6 +311,8 @@ func RunDaemon(cfg *config.Config) error {
 	}
 	agentManager.CloseAll()
 	sshProxy.CloseAll()
+	traceCollector.Close()
+	sessionStore.Close()
 	return srv.Shutdown(ctx)
 }
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/nlook-service/nlook-router/internal/apiclient"
+	"github.com/nlook-service/nlook-router/internal/tracing"
 )
 
 // StepResult holds the outcome of a single step execution.
@@ -62,6 +63,20 @@ func (e *StepExecutor) Execute(ctx context.Context, rctx *RunContext, workflowID
 
 	started := time.Now()
 
+	// Trace node start
+	var spanID string
+	if rctx.Tracer != nil && rctx.SessionID != "" {
+		spanID = tracing.NewSpanID()
+		rctx.Tracer.Emit(tracing.NewEvent(rctx.SessionID, tracing.EventNodeStart, node.NodeID).
+			WithSpan(spanID, "").
+			WithMeta(map[string]interface{}{
+				"node_type":   nodeType,
+				"workflow_id": workflowID,
+				"run_id":      rctx.RunID,
+				"step_order":  stepOrder,
+			}))
+	}
+
 	// Build input from parent node outputs
 	input := e.buildInput(rctx, node, parentNodeIDs)
 
@@ -71,6 +86,24 @@ func (e *StepExecutor) Execute(ctx context.Context, rctx *RunContext, workflowID
 		fmt.Sprintf("[%s] node=%s type=%s duration=%s",
 			result.Status, node.NodeID, nodeType, time.Since(started).Round(time.Millisecond)),
 	)
+
+	// Trace node complete/error
+	if rctx.Tracer != nil && rctx.SessionID != "" {
+		eventType := tracing.EventNodeComplete
+		level := tracing.LevelInfo
+		if result.Status == "failed" {
+			eventType = tracing.EventNodeError
+			level = tracing.LevelError
+		}
+		rctx.Tracer.Emit(tracing.NewEvent(rctx.SessionID, eventType, node.NodeID).
+			WithSpan(spanID, "").
+			WithDuration(time.Since(started).Milliseconds()).
+			WithLevel(level).
+			WithMeta(map[string]interface{}{
+				"status": result.Status,
+				"error":  result.Error,
+			}))
+	}
 
 	// Report step completion to cloud
 	if logRef.ID != 0 {

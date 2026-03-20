@@ -6,12 +6,14 @@ import (
 	"log"
 
 	"github.com/nlook-service/nlook-router/internal/apiclient"
+	"github.com/nlook-service/nlook-router/internal/tracing"
 )
 
 // WorkflowEngine orchestrates the execution of a workflow by traversing its DAG.
 type WorkflowEngine struct {
 	executor  *StepExecutor
 	groupExec *GroupExecutor
+	tracer    *tracing.Collector
 }
 
 // NewWorkflowEngine creates a new WorkflowEngine.
@@ -20,6 +22,11 @@ func NewWorkflowEngine(executor *StepExecutor) *WorkflowEngine {
 		executor:  executor,
 		groupExec: NewGroupExecutor(executor),
 	}
+}
+
+// SetTracer sets the trace collector for workflow execution tracing.
+func (e *WorkflowEngine) SetTracer(t *tracing.Collector) {
+	e.tracer = t
 }
 
 // SkillRunner returns the underlying skill runner for direct agent execution.
@@ -54,6 +61,8 @@ func (e *WorkflowEngine) Execute(ctx context.Context, detail *apiclient.Workflow
 
 	// Create RunContext
 	rctx := NewRunContext(run.ID, run.WorkflowID, run.UserID, run.Input)
+	rctx.SessionID = run.TraceID
+	rctx.Tracer = e.tracer
 
 	// Execute nodes in order
 	stepOrder := 0

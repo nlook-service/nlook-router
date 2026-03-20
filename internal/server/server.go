@@ -6,17 +6,21 @@ import (
 	"time"
 
 	"github.com/nlook-service/nlook-router/internal/llm"
+	"github.com/nlook-service/nlook-router/internal/session"
 	"github.com/nlook-service/nlook-router/internal/tools"
+	"github.com/nlook-service/nlook-router/internal/tracing"
 )
 
 // Server is the local HTTP API (health, status, tools).
 type Server struct {
-	addr        string
-	mux         *http.ServeMux
-	httpServer  *http.Server
-	status      *Status
-	toolsLister tools.Lister
-	llmEngine   *llm.Engine
+	addr         string
+	mux          *http.ServeMux
+	httpServer   *http.Server
+	status       *Status
+	toolsLister  tools.Lister
+	llmEngine    *llm.Engine
+	sessions     *session.Store
+	traceWriter  *tracing.Writer
 }
 
 // Status holds runtime status for GET /status.
@@ -48,6 +52,16 @@ func (s *Server) SetToolsLister(l tools.Lister) {
 // SetLLMEngine sets the LLM engine for model status queries.
 func (s *Server) SetLLMEngine(e *llm.Engine) {
 	s.llmEngine = e
+}
+
+// SetSessionStore sets the session store for session API endpoints.
+func (s *Server) SetSessionStore(st *session.Store) {
+	s.sessions = st
+}
+
+// SetTraceWriter sets the trace writer for trace query endpoints.
+func (s *Server) SetTraceWriter(tw *tracing.Writer) {
+	s.traceWriter = tw
 }
 
 // ListenAndServe blocks until the server is stopped.

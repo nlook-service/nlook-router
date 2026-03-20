@@ -3,6 +3,10 @@ package agentproxy
 import (
 	"encoding/json"
 	"log"
+	"time"
+
+	"github.com/nlook-service/nlook-router/internal/session"
+	"github.com/nlook-service/nlook-router/internal/tracing"
 )
 
 // WSMessage mirrors the WebSocket message envelope.
@@ -15,13 +19,14 @@ type WSMessage struct {
 
 // StartPayload requests a new agent session.
 type StartPayload struct {
-	SessionID string   `json:"session_id"`
-	Workspace string   `json:"workspace"`
-	Prompt    string   `json:"prompt"`
-	Args      []string `json:"args,omitempty"`
-	TaskID    int64    `json:"task_id,omitempty"`
-	Cols      int      `json:"cols,omitempty"`
-	Rows      int      `json:"rows,omitempty"`
+	SessionID       string   `json:"session_id"`
+	Workspace       string   `json:"workspace"`
+	Prompt          string   `json:"prompt"`
+	Args            []string `json:"args,omitempty"`
+	TaskID          int64    `json:"task_id,omitempty"`
+	Cols            int      `json:"cols,omitempty"`
+	Rows            int      `json:"rows,omitempty"`
+	ParentSessionID string   `json:"parent_session_id,omitempty"` // Cloud-created session ID
 }
 
 // InputPayload forwards user input to a running session.
@@ -96,6 +101,8 @@ type Handler struct {
 	manager       *SessionManager
 	sendWS        func(msg []byte)
 	usageRecorder UsageRecorder
+	sessions      *session.Store
+	tracer        *tracing.Collector
 }
 
 // NewHandler creates a new agent message handler.
@@ -109,6 +116,16 @@ func NewHandler(manager *SessionManager, sendWS func(msg []byte)) *Handler {
 // SetUsageRecorder sets the usage tracker for recording claude-cli token usage.
 func (h *Handler) SetUsageRecorder(r UsageRecorder) {
 	h.usageRecorder = r
+}
+
+// SetSessionStore sets the session store for binding agent sessions to parent sessions.
+func (h *Handler) SetSessionStore(s *session.Store) {
+	h.sessions = s
+}
+
+// SetTracer sets the trace collector for recording agent events.
+func (h *Handler) SetTracer(t *tracing.Collector) {
+	h.tracer = t
 }
 
 // HandleMessage processes an agent:* WebSocket message.
@@ -147,11 +164,75 @@ func (h *Handler) handleStart(payload json.RawMessage) {
 
 	log.Printf("agent: starting session %s in %s (task=%d)", p.SessionID, p.Workspace, p.TaskID)
 
+	// Bind to parent session if provided
+	if p.ParentSessionID != "" && h.sessions != nil {
+		sess := h.sessions.Get(p.ParentSessionID)
+		if sess != nil {
+			sess.BindAgent(p.SessionID)
+		}
+	}
+
+	// Trace agent start
+	var spanID string
+	if h.tracer != nil {
+		parentSess := p.ParentSessionID
+		if parentSess == "" {
+			parentSess = p.SessionID
+		}
+		spanID = tracing.NewSpanID()
+		h.tracer.Emit(tracing.NewEvent(parentSess, tracing.EventAgentStart, "claude-cli:start").
+			WithSpan(spanID, "").
+			WithMeta(map[string]interface{}{
+				"agent_session_id": p.SessionID,
+				"workspace":        p.Workspace,
+				"task_id":          p.TaskID,
+			}))
+	}
+
+	startTime := time.Now()
+
 	onEvent := func(event ClaudeStreamEvent) {
 		h.sendOutput(p.SessionID, event)
 	}
 
 	onDone := func(result ClaudeResult) {
+		// Trace agent complete
+		if h.tracer != nil {
+			parentSess := p.ParentSessionID
+			if parentSess == "" {
+				parentSess = p.SessionID
+			}
+			eventType := tracing.EventAgentComplete
+			level := tracing.LevelInfo
+			if result.IsError {
+				eventType = tracing.EventAgentError
+				level = tracing.LevelError
+			}
+			h.tracer.Emit(tracing.NewEvent(parentSess, eventType, "claude-cli:done").
+				WithSpan(spanID, "").
+				WithDuration(time.Since(startTime).Milliseconds()).
+				WithLevel(level).
+				WithMeta(map[string]interface{}{
+					"agent_session_id": p.SessionID,
+					"exit_code":        result.ExitCode,
+					"total_cost_usd":   result.TotalCost,
+				}))
+		}
+
+		// Record agent result to parent session context
+		if p.ParentSessionID != "" && h.sessions != nil {
+			if sess := h.sessions.Get(p.ParentSessionID); sess != nil {
+				sess.Context.AddAgentResult(session.AgentResult{
+					AgentSessionID: p.SessionID,
+					Result:         result.Result,
+					IsError:        result.IsError,
+					DurationMs:     result.DurationMs,
+					TotalCost:      result.TotalCost,
+					CompletedAt:    time.Now(),
+				})
+			}
+		}
+
 		h.sendCompleted(p.SessionID, result)
 	}
 

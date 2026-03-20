@@ -1,12 +1,21 @@
 package engine
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/nlook-service/nlook-router/internal/tracing"
+)
 
 // RunContext holds state shared across all steps during a single workflow execution.
 type RunContext struct {
 	RunID      int64
 	WorkflowID int64
 	UserID     int64
+
+	// SessionID is the Cloud-created session ID for tracing correlation.
+	SessionID string
+	// Tracer emits trace events. If nil, tracing is disabled for this run.
+	Tracer *tracing.Collector
 
 	// Input is the initial user-provided data for this run.
 	Input map[string]interface{}

@@ -23,10 +23,12 @@ import (
 	"github.com/nlook-service/nlook-router/internal/engine"
 	"github.com/nlook-service/nlook-router/internal/gemini"
 	"github.com/nlook-service/nlook-router/internal/llm"
-	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/ollama"
+	"github.com/nlook-service/nlook-router/internal/session"
+	"github.com/nlook-service/nlook-router/internal/tools"
+	"github.com/nlook-service/nlook-router/internal/tracing"
 	"github.com/nlook-service/nlook-router/internal/usage"
 )
 
@@ -51,6 +53,7 @@ type ChatRequestPayload struct {
 	Model          string           `json:"model,omitempty"`
 	Lang           string           `json:"lang,omitempty"`
 	History        []HistoryMessage `json:"history,omitempty"`
+	SessionID      string           `json:"session_id,omitempty"` // Cloud-created session ID
 }
 
 // ChatResponsePayload is sent back to cloud with the AI response.
@@ -95,6 +98,8 @@ type Handler struct {
 	promptBuilder *PromptBuilder
 	usageTracker  *usage.Tracker
 	sendWS        func(msg []byte)
+	sessions      *session.Store
+	tracer        *tracing.Collector
 }
 
 // SetLLMEngine sets the LLM engine (vLLM or Ollama).
@@ -123,6 +128,16 @@ func (h *Handler) SetVectorStore(vs *embedding.VectorStore) {
 func (h *Handler) SetMemoryStore(ms *memory.Store) {
 	h.memoryStore = ms
 	h.rebuildPromptBuilder()
+}
+
+// SetSessionStore sets the session store for tracking chat sessions.
+func (h *Handler) SetSessionStore(s *session.Store) {
+	h.sessions = s
+}
+
+// SetTracer sets the trace collector for recording chat events.
+func (h *Handler) SetTracer(t *tracing.Collector) {
+	h.tracer = t
 }
 
 func (h *Handler) rebuildPromptBuilder() {
@@ -183,16 +198,51 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 	log.Printf("[%s] conv=%d msg=%d history=%d lang=%s", traceID, req.ConversationID, req.MessageID, len(req.History), req.Lang)
 	log.Printf("[%s] mcp=%v engine=%v tools=%v", traceID, h.mcpClient != nil, h.llmEngine != nil, h.toolExecutor != nil)
 
+	// Register Cloud-created session locally
+	var sess *session.Session
+	if req.SessionID != "" && h.sessions != nil {
+		sess = h.sessions.GetOrRegister(req.SessionID, session.TypeChat, req.UserID)
+	}
+
+	// Track user message in session context
+	if sess != nil {
+		sess.Context.AddMessage("user", req.Query)
+	}
+
 	go func() {
 		startTime := time.Now()
 		ctx := context.WithValue(context.Background(), "trace_id", traceID)
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
+
+		// Trace LLM call start
+		var spanID string
+		if h.tracer != nil && req.SessionID != "" {
+			spanID = tracing.NewSpanID()
+			h.tracer.Emit(tracing.NewEvent(req.SessionID, tracing.EventLLMCall, "chat:llm").
+				WithSpan(spanID, "").
+				WithMeta(map[string]interface{}{
+					"conversation_id": req.ConversationID,
+					"query_length":    len(req.Query),
+					"model":           req.Model,
+				}))
+		}
+
 		resp, err := h.processChat(ctx, &req)
 		elapsed := time.Since(startTime)
 		if err != nil {
 			log.Printf("[%s] ✗ ERROR %s: %v", traceID, elapsed.Round(time.Millisecond), err)
 			log.Printf("[%s] ═══ CHAT END (error) ═════════════════════", traceID)
+
+			// Trace LLM error
+			if h.tracer != nil && req.SessionID != "" {
+				h.tracer.Emit(tracing.NewEvent(req.SessionID, tracing.EventError, "chat:error").
+					WithSpan(spanID, "").
+					WithDuration(elapsed.Milliseconds()).
+					WithLevel(tracing.LevelError).
+					WithMeta(map[string]interface{}{"error": err.Error()}))
+			}
+
 			h.sendResponse("chat:error", ChatErrorPayload{
 				ConversationID: req.ConversationID,
 				MessageID:      req.MessageID,
@@ -206,6 +256,23 @@ func (h *Handler) handleChatRequest(payload json.RawMessage) {
 		}
 		log.Printf("[%s] ✓ DONE %s model=%s len=%d tokens≈%d", traceID, elapsed.Round(time.Millisecond), resp.Model, len(resp.Content), resp.TokensUsed)
 		log.Printf("[%s] ═══ CHAT END ═════════════════════════════", traceID)
+
+		// Trace LLM response
+		if h.tracer != nil && req.SessionID != "" {
+			h.tracer.Emit(tracing.NewEvent(req.SessionID, tracing.EventLLMResponse, "chat:response").
+				WithSpan(spanID, "").
+				WithDuration(elapsed.Milliseconds()).
+				WithMeta(map[string]interface{}{
+					"model":       resp.Model,
+					"tokens_used": resp.TokensUsed,
+				}))
+		}
+
+		// Track assistant response in session context
+		if sess != nil {
+			sess.Context.AddMessage("assistant", resp.Content)
+		}
+
 		h.sendResponse("chat:response", resp)
 	}()
 }
