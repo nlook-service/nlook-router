@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -28,6 +29,26 @@ type Config struct {
 	GeminiAPIKey    string `yaml:"gemini_api_key,omitempty"`    // Gemini API key
 	CloudModel      string `yaml:"cloud_model,omitempty"`       // e.g. "gemini-2.0-flash-lite"
 	AnthropicAPIKey string `yaml:"anthropic_api_key,omitempty"` // Claude Haiku fallback
+
+	// Agent terminal settings (Claude Code CLI execution in workspaces)
+	Agent AgentConfig `yaml:"agent,omitempty"`
+}
+
+// AgentConfig holds settings for the agent terminal proxy.
+type AgentConfig struct {
+	Workspaces      []string      `yaml:"workspaces,omitempty"`
+	MaxSessions     int           `yaml:"max_sessions,omitempty"`
+	SessionTimeout  time.Duration `yaml:"session_timeout,omitempty"`
+	AllowedCommands []string      `yaml:"allowed_commands,omitempty"`
+}
+
+// AgentDefaults returns default agent config values.
+func AgentDefaults() AgentConfig {
+	return AgentConfig{
+		MaxSessions:     5,
+		SessionTimeout:  60 * time.Minute,
+		AllowedCommands: []string{"claude"},
+	}
 }
 
 // Default returns a config with default values.
@@ -56,6 +77,16 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Port == 0 {
 		c.Port = Default().Port
+	}
+	defaults := AgentDefaults()
+	if c.Agent.MaxSessions == 0 {
+		c.Agent.MaxSessions = defaults.MaxSessions
+	}
+	if c.Agent.SessionTimeout == 0 {
+		c.Agent.SessionTimeout = defaults.SessionTimeout
+	}
+	if len(c.Agent.AllowedCommands) == 0 {
+		c.Agent.AllowedCommands = defaults.AllowedCommands
 	}
 	return &c, nil
 }

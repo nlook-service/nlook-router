@@ -24,7 +24,9 @@ import (
 	"github.com/nlook-service/nlook-router/internal/llm"
 	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/memory"
+	"github.com/nlook-service/nlook-router/internal/ollama"
 	"github.com/nlook-service/nlook-router/internal/server"
+	"github.com/nlook-service/nlook-router/internal/agentproxy"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/usage"
@@ -32,7 +34,7 @@ import (
 )
 
 // Version is set by ldflags at build time, or defaults to dev.
-var Version = "0.2.54"
+var Version = "0.2.55"
 
 // RunDaemon starts the local HTTP server, heartbeat loop, WebSocket client, and SSH proxy.
 func RunDaemon(cfg *config.Config) error {
@@ -54,6 +56,25 @@ func RunDaemon(cfg *config.Config) error {
 	}
 	// Always include built-in tools
 	payload.Tools = tools.BuiltInTools()
+
+	// Discover local Ollama models
+	ollamaClient := ollama.NewClient()
+	if ollamaClient.IsRunning(context.Background()) {
+		if models, err := ollamaClient.List(context.Background()); err == nil {
+			for _, m := range models {
+				sizeMB := float64(m.Size) / (1024 * 1024)
+				sizeStr := fmt.Sprintf("%.0f MB", sizeMB)
+				if sizeMB >= 1024 {
+					sizeStr = fmt.Sprintf("%.1f GB", sizeMB/1024)
+				}
+				payload.Models = append(payload.Models, apiclient.ModelMeta{
+					Name:     m.Name,
+					Provider: "ollama",
+					Size:     sizeStr,
+				})
+			}
+		}
+	}
 
 	var toolsBridge *tools.CLIBridge
 	if cfg.ToolsBridgeDir != "" {
@@ -108,6 +129,14 @@ func RunDaemon(cfg *config.Config) error {
 
 	// SSH proxy
 	sshProxy := sshproxy.NewProxy()
+
+	// Agent proxy (Claude Code CLI execution in workspaces)
+	agentManager := agentproxy.NewSessionManager(ctx, agentproxy.SessionConfig{
+		Workspaces:      cfg.Agent.Workspaces,
+		MaxSessions:     cfg.Agent.MaxSessions,
+		SessionTimeout:  cfg.Agent.SessionTimeout,
+		AllowedCommands: cfg.Agent.AllowedCommands,
+	})
 
 	// WebSocket client (real-time communication with cloud)
 	var wsClient *ws.Client
@@ -174,12 +203,21 @@ func RunDaemon(cfg *config.Config) error {
 			wsClient.Send(msg)
 		})
 
-		// Route messages: sync first, then chat, then SSH
+		// Wire agent messages from cloud → agent proxy
+		agentHandler := agentproxy.NewHandler(agentManager, func(msg []byte) {
+			wsClient.Send(msg)
+		})
+		agentHandler.SetUsageRecorder(agentUsageAdapter{tracker: usageTracker})
+
+		// Route messages: sync → chat → agent → SSH
 		wsClient.OnMessage = func(msgType string, payload json.RawMessage) {
 			if syncHandler.HandleMessage(msgType, payload) {
 				return
 			}
 			if chatHandler.HandleMessage(msgType, payload) {
+				return
+			}
+			if agentHandler.HandleMessage(msgType, payload) {
 				return
 			}
 			sshHandler.HandleMessage(msgType, payload)
@@ -215,6 +253,24 @@ func RunDaemon(cfg *config.Config) error {
 	if wsClient != nil {
 		wsClient.Stop()
 	}
+	agentManager.CloseAll()
 	sshProxy.CloseAll()
 	return srv.Shutdown(ctx)
+}
+
+// agentUsageAdapter bridges usage.Tracker to agentproxy.UsageRecorder.
+type agentUsageAdapter struct {
+	tracker *usage.Tracker
+}
+
+func (a agentUsageAdapter) Record(u agentproxy.UsageRecord) {
+	a.tracker.Record(usage.TokenUsage{
+		UserID:       u.UserID,
+		Provider:     u.Provider,
+		Model:        u.Model,
+		Category:     u.Category,
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+		ElapsedMs:    u.ElapsedMs,
+	})
 }
