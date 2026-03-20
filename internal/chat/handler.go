@@ -481,42 +481,39 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 	localModel := h.findLocalModel(ctx, model)
 	complexity := h.classifyWithQwen(ctx, req.Query, localModel, tlog)
 
-	// simple → local model (gemma3), complex → Claude (high reasoning)
-	if complexity == "simple" {
-		if localModel != "" {
-			tlog("route: local %s (simple)", localModel)
-			resp, err := h.processChatOllama(ctx, req, localModel)
+	// Step 1: Always try local model with tool calling first (MCP function calling)
+	// gemma3 can call MCP tools (create_document, send_notification, etc.)
+	if localModel != "" && h.mcpClient != nil {
+		tlog("route: local %s tool-calling (%s)", localModel, complexity)
+		resp, err := h.processChatOllama(ctx, req, localModel)
+		if err == nil {
+			return resp, nil
+		}
+		tlog("route: local %s failed: %v", localModel, err)
+	}
+
+	// Step 2: simple without tools → local model (already tried with tools above)
+	// complex → Claude for high reasoning (no MCP tools but better analysis)
+	if complexity != "simple" {
+		claudePath := findClaude()
+		if claudePath != "" {
+			tlog("route: Claude Code CLI (%s)", complexity)
+			resp, err := h.processChatClaudeCLI(ctx, req, claudePath, complexity)
 			if err == nil {
 				return resp, nil
 			}
-			tlog("route: local %s failed: %v, escalating to Claude", localModel, err)
+			tlog("route: Claude CLI failed: %v, trying Gemini", err)
 		}
-	}
 
-	// Complex (or simple fallback): Claude → Gemini → local
-	claudePath := findClaude()
-	if claudePath != "" {
-		tlog("route: Claude Code CLI (%s)", complexity)
-		resp, err := h.processChatClaudeCLI(ctx, req, claudePath, complexity)
-		if err == nil {
-			return resp, nil
+		geminiClient := gemini.NewClient()
+		if geminiClient != nil {
+			tlog("route: Gemini Cloud (%s) (%s)", geminiClient.Model(), complexity)
+			resp, err := h.processChatGemini(ctx, req, geminiClient)
+			if err == nil {
+				return resp, nil
+			}
+			tlog("route: Gemini failed: %v", err)
 		}
-		tlog("route: Claude CLI failed: %v, trying Gemini", err)
-	}
-
-	geminiClient := gemini.NewClient()
-	if geminiClient != nil {
-		tlog("route: Gemini Cloud (%s) (%s)", geminiClient.Model(), complexity)
-		resp, err := h.processChatGemini(ctx, req, geminiClient)
-		if err == nil {
-			return resp, nil
-		}
-		tlog("route: Gemini failed: %v", err)
-	}
-
-	if complexity != "simple" && localModel != "" {
-		tlog("route: local %s (last resort)", localModel)
-		return h.processChatOllama(ctx, req, localModel)
 	}
 
 	return nil, fmt.Errorf("no LLM available: configure Ollama, Claude Code CLI, or Gemini")

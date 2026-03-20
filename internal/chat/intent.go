@@ -71,6 +71,12 @@ func DetectIntent(query string) *Intent {
 		return &Intent{Action: "list_documents", Query: query}
 	}
 
+	// Notification
+	notifyKeywords := []string{"알림 보내", "알림 전송", "알려줘 나한테", "notify", "send notification", "push 보내"}
+	if containsAny(q, notifyKeywords) {
+		return &Intent{Action: "send_notification", Query: query}
+	}
+
 	// Web search
 	searchKeywords := []string{"날씨", "검색", "찾아", "뉴스", "weather", "search", "find", "google", "최신", "현재"}
 	if containsAny(q, searchKeywords) {
@@ -145,6 +151,16 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 			itemType = "문서"
 		}
 		return fmt.Sprintf("[사용자가 %s 생성을 요청함. 아래 workspace 목록을 보여주고, 어떤 workspace에 저장할지 물어보세요. 직접 생성하지 마세요.]\n\nWorkspace 목록:\n%s", itemType, truncateStr(string(wsData), 2000))
+	case "send_notification":
+		tlog("intent: 🔔 sending notification")
+		title := extractTitle(intent.Query)
+		result, err = mcpClient.CallTool(ctx, "send_notification", map[string]interface{}{
+			"title":   title,
+			"message": intent.Query,
+		})
+		if err == nil {
+			return fmt.Sprintf("[알림을 전송했습니다: %s]\n사용자에게 알림이 전송되었음을 알려주세요.", title)
+		}
 	case "list_workspaces":
 		result, err = mcpClient.CallTool(ctx, "list_workspaces", map[string]interface{}{})
 	case "list_agents":
