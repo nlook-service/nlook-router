@@ -270,6 +270,65 @@ func TestStepExecutor_startStepError_continuesExecution(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// StepHook
+// ──────────────────────────────────────────────────────────────────────────────
+
+type recordingHook struct {
+	events []*StepEvent
+}
+
+func (h *recordingHook) OnStepComplete(_ context.Context, event *StepEvent) {
+	h.events = append(h.events, event)
+}
+
+func TestStepExecutor_hookCalledOnComplete(t *testing.T) {
+	mc := newMockClient()
+	exec := buildExecutor(mc)
+	rctx := NewRunContext(1, 1, 1, nil)
+
+	hook := &recordingHook{}
+	exec.AddHook(hook)
+
+	node := &apiclient.WorkflowNode{NodeID: "step-h", NodeType: "start"}
+	_, err := exec.Execute(context.Background(), rctx, 1, node, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(hook.events) != 1 {
+		t.Fatalf("expected 1 hook event, got %d", len(hook.events))
+	}
+	ev := hook.events[0]
+	if ev.NodeID != "step-h" {
+		t.Errorf("expected NodeID=step-h, got %s", ev.NodeID)
+	}
+	if ev.StepOrder != 3 {
+		t.Errorf("expected StepOrder=3, got %d", ev.StepOrder)
+	}
+	if ev.Result == nil || ev.Result.Status != "completed" {
+		t.Errorf("expected completed result")
+	}
+}
+
+func TestStepExecutor_multipleHooks(t *testing.T) {
+	mc := newMockClient()
+	exec := buildExecutor(mc)
+	rctx := NewRunContext(1, 1, 1, nil)
+
+	hook1 := &recordingHook{}
+	hook2 := &recordingHook{}
+	exec.AddHook(hook1)
+	exec.AddHook(hook2)
+
+	node := &apiclient.WorkflowNode{NodeID: "step-m", NodeType: "start"}
+	exec.Execute(context.Background(), rctx, 1, node, 0)
+
+	if len(hook1.events) != 1 || len(hook2.events) != 1 {
+		t.Fatalf("expected both hooks called, got %d and %d", len(hook1.events), len(hook2.events))
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // buildInput
 // ──────────────────────────────────────────────────────────────────────────────
 

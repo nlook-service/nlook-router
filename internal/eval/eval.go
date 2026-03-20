@@ -30,6 +30,11 @@ type RunOptions struct {
 	NumIterations  int
 }
 
+// WorkflowRunOptions configures a workflow-level eval run with per-step evaluation.
+type WorkflowRunOptions struct {
+	EvaluatorModel string
+}
+
 // EvalRunner orchestrates evaluation: generates answers, scores them, persists results.
 type EvalRunner struct {
 	db        DB
@@ -160,6 +165,95 @@ func (r *EvalRunner) Run(ctx context.Context, evalSetID string, opts RunOptions)
 	}
 
 	// Calculate statistics
+	if len(scores) > 0 {
+		var sum float64
+		for _, s := range scores {
+			sum += s
+		}
+		run.AvgScore = sum / float64(len(scores))
+
+		var variance float64
+		for _, s := range scores {
+			diff := s - run.AvgScore
+			variance += diff * diff
+		}
+		run.StdDev = math.Sqrt(variance / float64(len(scores)))
+	}
+
+	run.Status = "completed"
+	run.CompletedAt = time.Now()
+	if err := r.db.UpdateEvalRun(ctx, run); err != nil {
+		return nil, fmt.Errorf("update eval run: %w", err)
+	}
+
+	return run, nil
+}
+
+// PrepareWorkflowEval creates an EvalRun and returns a StepEvalHook to attach to the engine's StepExecutor.
+// The hook evaluates each workflow step's output against cases that have a matching NodeID.
+// After the workflow completes, call FinalizeWorkflowEval to persist results and statistics.
+func (r *EvalRunner) PrepareWorkflowEval(ctx context.Context, evalSetID string, opts WorkflowRunOptions) (*EvalRun, *StepEvalHook, error) {
+	set, err := r.db.GetEvalSet(ctx, evalSetID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get eval set: %w", err)
+	}
+	if set == nil {
+		return nil, nil, fmt.Errorf("eval set %q not found", evalSetID)
+	}
+
+	cases, err := r.db.ListEvalCases(ctx, evalSetID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list eval cases: %w", err)
+	}
+
+	// Build NodeID → EvalCase map (only cases with a NodeID set)
+	expectations := make(map[string]*EvalCase)
+	for _, c := range cases {
+		if c.NodeID != "" {
+			expectations[c.NodeID] = c
+		}
+	}
+	if len(expectations) == 0 {
+		return nil, nil, fmt.Errorf("eval set %q has no step-level cases (cases need node_id)", evalSetID)
+	}
+
+	evaluatorModel := opts.EvaluatorModel
+	if evaluatorModel == "" {
+		evaluatorModel = r.evaluator.model
+	}
+
+	run := &EvalRun{
+		ID:             uuid.New().String(),
+		EvalSetID:      evalSetID,
+		EvaluatorModel: evaluatorModel,
+		TargetModel:    set.Model,
+		Status:         "running",
+		NumIterations:  1,
+		TotalCases:     len(expectations),
+		StartedAt:      time.Now(),
+	}
+	if err := r.db.InsertEvalRun(ctx, run); err != nil {
+		return nil, nil, fmt.Errorf("insert eval run: %w", err)
+	}
+
+	hook := NewStepEvalHook(expectations, r.evaluator, run.ID)
+	return run, hook, nil
+}
+
+// FinalizeWorkflowEval persists step-level results from the hook and updates run statistics.
+func (r *EvalRunner) FinalizeWorkflowEval(ctx context.Context, run *EvalRun, hook *StepEvalHook) (*EvalRun, error) {
+	results := hook.Results()
+	var scores []float64
+
+	for _, result := range results {
+		if err := r.db.InsertEvalResult(ctx, result); err != nil {
+			log.Printf("eval: save step result failed: %v", err)
+			continue
+		}
+		scores = append(scores, float64(result.AccuracyScore))
+		run.CompletedCases++
+	}
+
 	if len(scores) > 0 {
 		var sum float64
 		for _, s := range scores {

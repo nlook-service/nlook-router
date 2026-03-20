@@ -17,12 +17,31 @@ type StepResult struct {
 	LogLines []string
 }
 
+// StepEvent contains all metadata about a completed step, passed to StepHook callbacks.
+type StepEvent struct {
+	WorkflowID int64
+	RunID      int64
+	NodeID     string
+	NodeType   string
+	StepOrder  int
+	Input      map[string]interface{}
+	Result     *StepResult
+	Duration   time.Duration
+}
+
+// StepHook is called after each workflow step completes.
+// Implementations can capture step outputs for evaluation, logging, etc.
+type StepHook interface {
+	OnStepComplete(ctx context.Context, event *StepEvent)
+}
+
 // StepExecutor executes individual workflow nodes and reports to cloud via apiclient.
 type StepExecutor struct {
 	client      apiclient.Interface
 	skillRunner *SkillRunner
 	skills      map[int64]*apiclient.WorkflowSkill
 	agents      map[int64]*apiclient.WorkflowAgent
+	hooks       []StepHook
 }
 
 // NewStepExecutor creates a new StepExecutor.
@@ -33,6 +52,11 @@ func NewStepExecutor(client apiclient.Interface, skillRunner *SkillRunner) *Step
 		skills:      make(map[int64]*apiclient.WorkflowSkill),
 		agents:      make(map[int64]*apiclient.WorkflowAgent),
 	}
+}
+
+// AddHook registers a StepHook to be called after each step completes.
+func (e *StepExecutor) AddHook(h StepHook) {
+	e.hooks = append(e.hooks, h)
 }
 
 // LoadSkillsAndAgents pre-loads skills and agents from workflow detail into lookup maps.
@@ -116,6 +140,23 @@ func (e *StepExecutor) Execute(ctx context.Context, rctx *RunContext, workflowID
 	// Store output in context for downstream nodes
 	if result.Output != nil {
 		rctx.SetNodeOutput(node.NodeID, result.Output)
+	}
+
+	// Fire step hooks
+	if len(e.hooks) > 0 {
+		event := &StepEvent{
+			WorkflowID: workflowID,
+			RunID:      rctx.RunID,
+			NodeID:     node.NodeID,
+			NodeType:   nodeType,
+			StepOrder:  stepOrder,
+			Input:      input,
+			Result:     result,
+			Duration:   time.Since(started),
+		}
+		for _, h := range e.hooks {
+			h.OnStepComplete(ctx, event)
+		}
 	}
 
 	return result, nil

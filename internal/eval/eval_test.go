@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
 )
 
 // --- mock DB ---
@@ -252,6 +253,167 @@ func TestEvalRunStatistics(t *testing.T) {
 	// Variance of [8,9,7,10,6] with mean=8: (0+1+1+4+4)/5 = 2.0
 	if stddev != 2.0 {
 		t.Fatalf("variance = %.1f, want 2.0", stddev)
+	}
+}
+
+// --- step-level eval tests ---
+
+func TestStepEvalHookCaptureOnly(t *testing.T) {
+	hook := NewStepEvalHook(nil, nil, "run-1")
+
+	ctx := context.Background()
+	hook.HandleStepComplete(ctx, &StepCompleteData{
+		NodeID:   "node-a",
+		NodeType: "step",
+		Output:   map[string]interface{}{"text": "hello"},
+		Status:   "completed",
+		Duration: 100 * time.Millisecond,
+	})
+	hook.HandleStepComplete(ctx, &StepCompleteData{
+		NodeID:   "node-b",
+		NodeType: "agent",
+		Output:   map[string]interface{}{"text": "world"},
+		Status:   "completed",
+		Duration: 200 * time.Millisecond,
+	})
+
+	captures := hook.Captures()
+	if len(captures) != 2 {
+		t.Fatalf("expected 2 captures, got %d", len(captures))
+	}
+	if captures[0].NodeID != "node-a" {
+		t.Fatalf("expected node-a, got %s", captures[0].NodeID)
+	}
+	if captures[1].NodeID != "node-b" {
+		t.Fatalf("expected node-b, got %s", captures[1].NodeID)
+	}
+	// No evaluator → no results
+	if len(hook.Results()) != 0 {
+		t.Fatalf("expected 0 results, got %d", len(hook.Results()))
+	}
+}
+
+func TestStepEvalHookNoMatchingExpectation(t *testing.T) {
+	// Expectations for node-x, but step fires for node-y
+	expectations := map[string]*EvalCase{
+		"node-x": {ID: "case-1", NodeID: "node-x", Input: "q", ExpectedOutput: "a"},
+	}
+	hook := NewStepEvalHook(expectations, &AccuracyEvaluator{model: "test"}, "run-1")
+
+	ctx := context.Background()
+	hook.HandleStepComplete(ctx, &StepCompleteData{
+		NodeID:   "node-y",
+		NodeType: "step",
+		Output:   map[string]interface{}{"text": "hello"},
+		Status:   "completed",
+	})
+
+	// Captured but not evaluated
+	if len(hook.Captures()) != 1 {
+		t.Fatalf("expected 1 capture, got %d", len(hook.Captures()))
+	}
+	if len(hook.Results()) != 0 {
+		t.Fatalf("expected 0 results, got %d", len(hook.Results()))
+	}
+}
+
+func TestFlattenOutput(t *testing.T) {
+	tests := []struct {
+		name   string
+		output map[string]interface{}
+		expect string
+	}{
+		{"nil", nil, ""},
+		{"text field", map[string]interface{}{"text": "hello"}, "hello"},
+		{"content field", map[string]interface{}{"content": "world"}, "world"},
+		{"text priority", map[string]interface{}{"text": "t", "content": "c"}, "t"},
+		{"json fallback", map[string]interface{}{"key": "val"}, `{"key":"val"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := flattenOutput(tc.output)
+			if got != tc.expect {
+				t.Fatalf("flattenOutput = %q, want %q", got, tc.expect)
+			}
+		})
+	}
+}
+
+func TestPrepareWorkflowEvalValidation(t *testing.T) {
+	db := newMockDB()
+	ctx := context.Background()
+	runner := &EvalRunner{db: db, evaluator: &AccuracyEvaluator{model: "test"}}
+
+	// Not found
+	_, _, err := runner.PrepareWorkflowEval(ctx, "none", WorkflowRunOptions{})
+	if err == nil {
+		t.Fatal("expected error for missing set")
+	}
+
+	// Set exists but no step-level cases
+	db.sets["s1"] = &EvalSet{ID: "s1", Name: "test", TargetType: "workflow"}
+	db.cases["s1"] = []*EvalCase{
+		{ID: "c1", EvalSetID: "s1", Input: "q", ExpectedOutput: "a"}, // no NodeID
+	}
+	_, _, err = runner.PrepareWorkflowEval(ctx, "s1", WorkflowRunOptions{})
+	if err == nil {
+		t.Fatal("expected error for no step-level cases")
+	}
+
+	// With step-level case
+	db.cases["s1"] = append(db.cases["s1"], &EvalCase{
+		ID: "c2", EvalSetID: "s1", Input: "q2", ExpectedOutput: "a2", NodeID: "node-1",
+	})
+	run, hook, err := runner.PrepareWorkflowEval(ctx, "s1", WorkflowRunOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if run.Status != "running" {
+		t.Fatalf("expected running, got %s", run.Status)
+	}
+	if hook == nil {
+		t.Fatal("expected hook")
+	}
+	if run.TotalCases != 1 {
+		t.Fatalf("expected 1 total case, got %d", run.TotalCases)
+	}
+}
+
+func TestFinalizeWorkflowEval(t *testing.T) {
+	db := newMockDB()
+	ctx := context.Background()
+	runner := &EvalRunner{db: db, evaluator: &AccuracyEvaluator{model: "test"}}
+
+	run := &EvalRun{
+		ID:        "run-1",
+		EvalSetID: "s1",
+		Status:    "running",
+		StartedAt: time.Now(),
+	}
+	db.runs[run.ID] = run
+
+	// Simulate hook with pre-populated results
+	hook := NewStepEvalHook(nil, nil, run.ID)
+	hook.results = []*EvalResult{
+		{ID: "r1", EvalRunID: run.ID, EvalCaseID: "c1", AccuracyScore: 8},
+		{ID: "r2", EvalRunID: run.ID, EvalCaseID: "c2", AccuracyScore: 6},
+	}
+
+	finalRun, err := runner.FinalizeWorkflowEval(ctx, run, hook)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if finalRun.Status != "completed" {
+		t.Fatalf("expected completed, got %s", finalRun.Status)
+	}
+	if finalRun.CompletedCases != 2 {
+		t.Fatalf("expected 2 completed, got %d", finalRun.CompletedCases)
+	}
+	if finalRun.AvgScore != 7.0 {
+		t.Fatalf("expected avg 7.0, got %.1f", finalRun.AvgScore)
+	}
+	if len(db.results) != 2 {
+		t.Fatalf("expected 2 persisted results, got %d", len(db.results))
 	}
 }
 

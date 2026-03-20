@@ -33,8 +33,16 @@ func newSQLiteDB(path string) (*SQLiteDB, error) {
 }
 
 func (s *SQLiteDB) Migrate(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, schemaDDL)
-	return err
+	if _, err := s.db.ExecContext(ctx, schemaDDL); err != nil {
+		return err
+	}
+	// Add columns that may not exist in older databases.
+	for _, stmt := range []string{
+		`ALTER TABLE eval_cases ADD COLUMN node_id TEXT DEFAULT ''`,
+	} {
+		s.db.ExecContext(ctx, stmt) // ignore "duplicate column" errors
+	}
+	return nil
 }
 
 const schemaDDL = `
@@ -160,6 +168,7 @@ CREATE TABLE IF NOT EXISTS eval_cases (
     expected_output TEXT NOT NULL,
     context TEXT DEFAULT '',
     metadata TEXT DEFAULT '{}',
+    node_id TEXT DEFAULT '',
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_eval_cases_set ON eval_cases(eval_set_id);
@@ -878,14 +887,14 @@ func (s *SQLiteDB) DeleteEvalSet(ctx context.Context, id string) error {
 
 func (s *SQLiteDB) InsertEvalCase(ctx context.Context, c *eval.EvalCase) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO eval_cases (id, eval_set_id, input, expected_output, context, metadata, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		c.ID, c.EvalSetID, c.Input, c.ExpectedOutput, c.Context, c.Metadata, toEpoch(c.CreatedAt))
+		INSERT INTO eval_cases (id, eval_set_id, input, expected_output, context, metadata, node_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.EvalSetID, c.Input, c.ExpectedOutput, c.Context, c.Metadata, c.NodeID, toEpoch(c.CreatedAt))
 	return err
 }
 
 func (s *SQLiteDB) ListEvalCases(ctx context.Context, evalSetID string) ([]*eval.EvalCase, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, eval_set_id, input, expected_output, context, metadata, created_at FROM eval_cases WHERE eval_set_id=? ORDER BY created_at`, evalSetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, eval_set_id, input, expected_output, context, metadata, node_id, created_at FROM eval_cases WHERE eval_set_id=? ORDER BY created_at`, evalSetID)
 	if err != nil {
 		return nil, err
 	}
@@ -894,7 +903,7 @@ func (s *SQLiteDB) ListEvalCases(ctx context.Context, evalSetID string) ([]*eval
 	for rows.Next() {
 		var c eval.EvalCase
 		var createdAt int64
-		if err := rows.Scan(&c.ID, &c.EvalSetID, &c.Input, &c.ExpectedOutput, &c.Context, &c.Metadata, &createdAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.EvalSetID, &c.Input, &c.ExpectedOutput, &c.Context, &c.Metadata, &c.NodeID, &createdAt); err != nil {
 			return nil, err
 		}
 		c.CreatedAt = fromEpoch(createdAt)

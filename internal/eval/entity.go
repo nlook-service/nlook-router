@@ -19,6 +19,7 @@ type EvalCase struct {
 	ExpectedOutput string    `json:"expected_output"`
 	Context        string    `json:"context,omitempty"`
 	Metadata       string    `json:"metadata,omitempty"`
+	NodeID         string    `json:"node_id,omitempty"` // workflow step targeting (empty = final output only)
 	CreatedAt      time.Time `json:"created_at"`
 }
 
