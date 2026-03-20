@@ -82,11 +82,20 @@ type ToolMeta struct {
 	Parameters  map[string]interface{} `json:"parameters,omitempty"`
 }
 
+// ModelMeta describes a local model available on a router.
+type ModelMeta struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider"`          // "ollama", "vllm"
+	Size     string `json:"size,omitempty"`     // e.g. "4.9 GB"
+	Family   string `json:"family,omitempty"`   // e.g. "qwen2"
+}
+
 // RegisterPayload is sent to the server to register this router.
 type RegisterPayload struct {
 	RouterID string      `json:"router_id"`
 	Version  string      `json:"version"`
 	Tools    []ToolMeta  `json:"tools,omitempty"`
+	Models   []ModelMeta `json:"models,omitempty"`
 }
 
 // Schedule represents a workflow schedule from the server.
