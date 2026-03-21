@@ -81,25 +81,59 @@ func (r *Router) IntentStore() *IntentStore {
 }
 
 // scoreTier maps similarity score to model tier, respecting per-category minimums.
+//
+// Logic:
+//   - High score + simple category → tier 1 (local, fast)
+//   - High score + complex category → tier from category complexity
+//   - Low score (no confident match) → tier 2 (Haiku) to understand, NOT tier 4
+//   - Only high-confidence reasoning matches → tier 3-4
 func (r *Router) scoreTier(score float64, intent string) int {
-	// Base tier from score
-	tier := 4
-	switch {
-	case score >= r.thresholds.Tier1:
-		tier = 1
-	case score >= r.thresholds.Tier2:
-		tier = 2
-	case score >= r.thresholds.Tier3:
-		tier = 3
-	}
-
-	// Enforce per-category minimum (learned from feedback)
 	cat := r.intentStore.Get(intent)
-	if cat != nil && tier < cat.MinTier {
-		tier = cat.MinTier
+
+	// Low confidence: no clear match → use Haiku to classify properly
+	if score < r.thresholds.Tier3 {
+		return 2 // Haiku can handle ambiguous queries
 	}
 
-	return tier
+	// Confident match: use category's complexity to determine tier
+	if score >= r.thresholds.Tier1 {
+		// Very high confidence → use category's preferred tier
+		if cat != nil && cat.Complexity == "simple" {
+			return max(1, cat.MinTier)
+		}
+		if cat != nil && cat.Complexity == "reasoning" {
+			return max(3, cat.MinTier)
+		}
+		return max(2, cat.MinTier) // complex default
+	}
+
+	if score >= r.thresholds.Tier2 {
+		// Good confidence → category complexity determines tier
+		if cat != nil {
+			switch cat.Complexity {
+			case "simple":
+				return max(1, cat.MinTier)
+			case "reasoning":
+				return max(3, cat.MinTier)
+			default:
+				return max(2, cat.MinTier)
+			}
+		}
+		return 2
+	}
+
+	// Score between Tier3 and Tier2: moderate confidence
+	if cat != nil && cat.Complexity == "simple" {
+		return max(1, cat.MinTier)
+	}
+	return max(2, cat.MinTier)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // tierModel resolves a tier number to a model name.
