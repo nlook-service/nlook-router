@@ -30,8 +30,10 @@ type Config struct {
 	CloudModel      string `yaml:"cloud_model,omitempty"`       // e.g. "gemini-2.0-flash-lite"
 	AnthropicAPIKey string `yaml:"anthropic_api_key,omitempty"` // Claude Haiku fallback
 
-	// Reasoning model: used when :thinking mode is enabled (e.g. "claude-sonnet-4-6")
-	ReasoningModel string `yaml:"reasoning_model,omitempty"`
+	// Reasoning models: self-evaluation selects the appropriate tier
+	ReasoningModel      string `yaml:"reasoning_model,omitempty"`       // default/medium: e.g. "claude-sonnet-4-6"
+	ReasoningModelLight string `yaml:"reasoning_model_light,omitempty"` // light tasks: e.g. "claude-haiku-4-5-20251001"
+	ReasoningModelDeep  string `yaml:"reasoning_model_deep,omitempty"`  // deep analysis: e.g. "claude-opus-4-6"
 
 	// Agent terminal settings (Claude Code CLI execution in workspaces)
 	Agent AgentConfig `yaml:"agent,omitempty"`

@@ -78,13 +78,13 @@ func DetectIntent(query string) *Intent {
 	}
 
 	// Web search
-	searchKeywords := []string{"날씨", "검색", "찾아", "뉴스", "weather", "search", "find", "google", "최신", "현재"}
+	searchKeywords := []string{"날씨", "검색", "찾아", "뉴스", "weather", "search", "find", "google", "최신", "현재", "몇시", "몇 시", "공연", "일정", "경기", "오늘", "내일", "어제", "schedule", "when"}
 	if containsAny(q, searchKeywords) {
 		return &Intent{Action: "web_search", Query: query}
 	}
 
-	// Calculator
-	calcKeywords := []string{"계산", "calculate", "몇", "합계", "평균"}
+	// Calculator (math-specific only)
+	calcKeywords := []string{"계산", "calculate", "합계", "평균", "더하기", "빼기", "곱하기", "나누기", "퍼센트", "percent"}
 	if containsAny(q, calcKeywords) {
 		return &Intent{Action: "calculator", Query: query}
 	}

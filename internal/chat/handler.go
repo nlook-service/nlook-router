@@ -481,27 +481,47 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		}
 	}
 
-	// Intent detection: directly call MCP tools without relying on model
+	// 1. Fetch referenced document/task content (highest priority)
 	if h.mcpClient != nil {
-		// 1. Fetch referenced document/task content (highest priority)
 		refContent := ExtractDocumentRefs(ctx, req.Query, h.mcpClient)
-		hasRefs := refContent != ""
-		if hasRefs {
+		if refContent != "" {
 			tlog("ref: found document/task references")
 			req.Query = req.Query + refContent + "\n\nAbove is the referenced content. Analyze and respond based on this data."
 		}
+	}
 
-		// 2. Auto-detect intent — skip if document refs already fetched
-		if !hasRefs {
-		if intent := DetectIntent(req.Query); intent != nil {
-			// Confirm-create intents: send chat:action with workspace options
-			if intent.Action == "confirm_create_document" || intent.Action == "confirm_create_task" {
+	// 2. Unified classification: Haiku determines both intent and complexity in one call
+	classified := h.classifyWithHaiku(ctx, req.Query, tlog)
+
+	// 3. Execute intent-based tool calls (web_search, calculator, MCP tools)
+	if classified.Intent != "general" {
+		intent := &Intent{Action: classified.Intent, Query: req.Query}
+
+		// Confirm-create intents: send chat:action with workspace options
+		if h.mcpClient != nil && (intent.Action == "confirm_create_document" || intent.Action == "confirm_create_task") {
+			if actionResp := h.handleCreateAction(ctx, req, intent); actionResp != nil {
+				return actionResp, nil
+			}
+		}
+
+		// Map Haiku intent names to existing intent actions
+		switch classified.Intent {
+		case "create_task":
+			intent.Action = "confirm_create_task"
+			if h.mcpClient != nil {
 				if actionResp := h.handleCreateAction(ctx, req, intent); actionResp != nil {
 					return actionResp, nil
 				}
 			}
-
-			// Send immediate feedback: "데이터 조회 중..."
+		case "create_document":
+			intent.Action = "confirm_create_document"
+			if h.mcpClient != nil {
+				if actionResp := h.handleCreateAction(ctx, req, intent); actionResp != nil {
+					return actionResp, nil
+				}
+			}
+		default:
+			// Execute tool (web_search, calculator, list_tasks, list_documents, etc.)
 			h.sendResponse("chat:delta", ChatDeltaPayload{
 				ConversationID: req.ConversationID,
 				MessageID:      req.MessageID,
@@ -514,12 +534,11 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 				req.Query = fmt.Sprintf("%s\n\n[Tool Result: %s]\n%s\n[End Tool Result]\n\nAbove is the data. Present it clearly and concisely to the user.", req.Query, intent.Action, toolResult)
 			}
 		}
-		} // end !hasRefs
 	}
 
-	// Classify complexity: simple → local model, complex → cloud, reasoning → Claude reasoning
+	// 4. Route based on complexity
 	localModel := h.findLocalModel(ctx, model)
-	complexity := h.classifyWithQwen(ctx, req.Query, localModel, tlog)
+	complexity := classified.Complexity
 
 	// Auto reasoning: if classified as "reasoning" and reasoning manager + model configured
 	if complexity == "reasoning" && h.reasoningMgr != nil && h.reasoningModel != "" {
@@ -1309,84 +1328,127 @@ func (h *Handler) processChatOllamaSimple(ctx context.Context, req *ChatRequestP
 }
 
 // classifyWithQwen always calls qwen for classification (for usage tracking).
-func (h *Handler) classifyWithQwen(ctx context.Context, query string, localModel string, tlog func(string, ...interface{})) string {
-	if localModel == "" {
-		return "complex" // no local model, default to complex
-	}
+// classifyResult holds the unified classification from Haiku.
+type classifyResult struct {
+	Intent     string `json:"intent"`     // web_search, calculator, create_task, create_document, list_tasks, list_documents, general
+	Complexity string `json:"complexity"` // simple, complex, reasoning
+}
 
-	ollamaClient := ollama.NewClient()
-	if !ollamaClient.IsRunning(ctx) {
-		return "complex"
-	}
-
+// classifyWithHaiku uses Claude Haiku CLI for accurate intent + complexity classification.
+// Falls back to keyword-based classification if CLI is unavailable.
+func (h *Handler) classifyWithHaiku(ctx context.Context, query string, tlog func(string, ...interface{})) classifyResult {
 	classifyQuery := strings.TrimSpace(query)
 	if idx := strings.Index(classifyQuery, "[Tool Result:"); idx >= 0 {
 		classifyQuery = strings.TrimSpace(classifyQuery[:idx])
 	}
 
-	// Short messages (< 15 chars) are always simple
-	if len(classifyQuery) < 15 {
-		if h.usageTracker != nil {
-			h.usageTracker.Record(usage.TokenUsage{
-				Provider: "ollama", Model: localModel, Category: "intent",
-				InputTokens: 0, OutputTokens: 0,
-			})
-		}
-		tlog("classify: short → simple (len=%d)", len(classifyQuery))
-		return "simple"
+	// Short messages: skip Haiku call
+	if len(classifyQuery) < 5 {
+		tlog("classify: short → simple/general (len=%d)", len(classifyQuery))
+		return classifyResult{Intent: "general", Complexity: "simple"}
 	}
 
-	// Keyword fast-path for reasoning (skip qwen for clear reasoning tasks)
-	lowerQuery := strings.ToLower(classifyQuery)
-	reasoningKeywords := []string{
-		"분석해", "비교해", "전략", "원인", "파악", "계획 세워", "계획 수립",
-		"왜 이런", "장단점", "평가해", "검토해", "추론", "판단해",
-		"analyze", "compare", "strategy", "root cause", "evaluate", "assess",
-		"pros and cons", "trade-off", "reason about", "plan for",
-	}
-	for _, kw := range reasoningKeywords {
-		if strings.Contains(lowerQuery, kw) {
-			tlog("classify: keyword → reasoning (%s)", kw)
-			return "reasoning"
-		}
+	claudePath := findClaude()
+	if claudePath == "" {
+		tlog("classify: claude CLI not found, fallback to keyword")
+		return h.classifyByKeyword(classifyQuery, tlog)
 	}
 
-	classifyPrompt := fmt.Sprintf(
-		`Classify as "simple", "complex", or "reasoning". Reply ONE word only.
+	prompt := fmt.Sprintf(`Classify this user message. Reply with ONLY a JSON object, no other text.
 
-simple: greetings, short Q&A, status checks, listing items (하이, 안녕, 할일 보여줘, hi, show tasks)
-complex: writing, translation, code generation, document creation (블로그 작성해줘, 번역해줘, 코드 짜줘)
-reasoning: multi-step analysis, planning, strategy, comparison, problem-solving, data interpretation (이 데이터 분석해서 전략 세워줘, 장단점 비교해줘, 원인 파악해줘, 왜 이런 현상이 발생하는지 설명해, 계획 수립해줘)
+Categories:
+- intent: "web_search" | "calculator" | "create_task" | "create_document" | "list_tasks" | "list_documents" | "general"
+- complexity: "simple" | "complex" | "reasoning"
 
-Message: %s`, classifyQuery)
+Rules:
+- web_search: needs real-time info (time, weather, news, events, schedules, prices)
+- calculator: explicit math operations (add, multiply, percentage)
+- create_task/create_document: user wants to create/save something
+- list_tasks/list_documents: user wants to see existing items
+- general: everything else
+- simple: greetings, short Q&A, listing, presenting data
+- complex: writing, translation, code generation, content creation
+- reasoning: multi-step analysis, strategy, comparison, root cause, planning
 
-	result, inTok, outTok, err := ollamaClient.ChatStream(ctx, localModel, "", classifyPrompt,
-		ollama.ChatOptions{MaxTokens: 3, Temperature: 0.0},
-		nil,
-	)
+Message: "%s"`, classifyQuery)
+
+	cmdCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, claudePath, "-p", prompt, "--model", "claude-haiku-4-5-20251001", "--output-format", "json")
+	output, err := cmd.Output()
 	if err != nil {
-		tlog("classify: qwen error: %v", err)
-		return "complex"
+		tlog("classify: haiku CLI error: %v, fallback to keyword", err)
+		return h.classifyByKeyword(classifyQuery, tlog)
 	}
+
+	// Parse CLI JSON response: {"type":"result","result":"..."}
+	var cliResp struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(output, &cliResp); err != nil {
+		tlog("classify: haiku parse error: %v", err)
+		return h.classifyByKeyword(classifyQuery, tlog)
+	}
+
+	// Extract JSON from result (may have markdown code fence)
+	jsonStr := cliResp.Result
+	if idx := strings.Index(jsonStr, "{"); idx >= 0 {
+		if end := strings.LastIndex(jsonStr, "}"); end > idx {
+			jsonStr = jsonStr[idx : end+1]
+		}
+	}
+
+	var result classifyResult
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		tlog("classify: haiku JSON parse error: %v, raw=%s", err, truncateStr(cliResp.Result, 200))
+		return h.classifyByKeyword(classifyQuery, tlog)
+	}
+
+	tlog("classify: haiku → intent=%s complexity=%s", result.Intent, result.Complexity)
 
 	if h.usageTracker != nil {
 		h.usageTracker.Record(usage.TokenUsage{
-			Provider: "ollama", Model: localModel, Category: "intent",
-			InputTokens: inTok, OutputTokens: outTok,
+			Provider: "anthropic", Model: "claude-haiku-4-5-20251001", Category: "intent",
 		})
 	}
 
-	result = strings.TrimSpace(strings.ToLower(result))
-	if strings.Contains(result, "reasoning") {
-		tlog("classify: qwen → reasoning (in=%d out=%d)", inTok, outTok)
-		return "reasoning"
+	return result
+}
+
+// classifyByKeyword is the fallback classifier when Haiku is unavailable.
+func (h *Handler) classifyByKeyword(query string, tlog func(string, ...interface{})) classifyResult {
+	q := strings.ToLower(query)
+	result := classifyResult{Intent: "general", Complexity: "simple"}
+
+	// Intent detection
+	switch {
+	case containsAny(q, []string{"날씨", "검색", "찾아", "뉴스", "몇시", "몇 시", "공연", "일정", "오늘", "내일", "weather", "search", "when"}):
+		result.Intent = "web_search"
+	case containsAny(q, []string{"계산", "calculate", "더하기", "빼기", "곱하기", "나누기"}):
+		result.Intent = "calculator"
+	case containsAny(q, []string{"할일", "할 일", "todo", "task"}) && containsAny(q, []string{"보여", "목록", "조회", "list", "show"}):
+		result.Intent = "list_tasks"
+	case containsAny(q, []string{"문서", "글", "노트", "메모"}) && containsAny(q, []string{"보여", "목록", "조회", "list", "show"}):
+		result.Intent = "list_documents"
+	case containsAny(q, []string{"추가해", "만들어", "생성해", "등록해", "저장해"}):
+		if containsAny(q, []string{"문서", "글", "노트", "메모"}) {
+			result.Intent = "create_document"
+		} else {
+			result.Intent = "create_task"
+		}
 	}
-	if strings.Contains(result, "simple") {
-		tlog("classify: qwen → simple (in=%d out=%d)", inTok, outTok)
-		return "simple"
+
+	// Complexity detection
+	switch {
+	case containsAny(q, []string{"분석해", "비교해", "전략", "원인", "파악", "장단점", "평가해", "analyze", "compare", "strategy", "root cause"}):
+		result.Complexity = "reasoning"
+	case containsAny(q, []string{"작성해", "써줘", "만들어", "번역해", "코드", "블로그", "write", "generate", "translate"}):
+		result.Complexity = "complex"
 	}
-	tlog("classify: qwen → complex (in=%d out=%d)", inTok, outTok)
-	return "complex"
+
+	tlog("classify: keyword fallback → intent=%s complexity=%s", result.Intent, result.Complexity)
+	return result
 }
 
 // findLocalModel returns a usable local model name, or empty string.
