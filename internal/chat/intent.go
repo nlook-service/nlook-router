@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -122,7 +123,8 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 				toolName = "read_url"
 				toolArgs = map[string]interface{}{"url": url}
 			} else {
-				toolName = "search_web"
+				// DuckDuckGo first (free, no API key), Serper as fallback
+				toolName = "web_search" // DuckDuckGo
 			}
 		}
 		tlog("intent: 🔧 calling built-in tool: %s (tool=%s)", intent.Action, toolName)
@@ -136,19 +138,18 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 		// Parse bridge response: check for nested errors
 		resultStr := extractToolResult(result)
 
-		// If search_web (Serper) failed, fallback to web_search (DuckDuckGo)
-		if toolName == "search_web" && isToolError(resultStr) {
-			tlog("intent: ⚠ search_web failed (result=%s), trying DuckDuckGo fallback", truncateStr(resultStr, 200))
-			result, err = toolExec.Execute(ctx, "web_search", map[string]interface{}{"query": intent.Query})
+		// If DuckDuckGo failed, try Serper (search_web) as fallback
+		if toolName == "web_search" && isToolError(resultStr) {
+			tlog("intent: ⚠ DuckDuckGo failed, trying Serper fallback (search_web)")
+			result, err = toolExec.Execute(ctx, "search_web", map[string]interface{}{"query": intent.Query})
 			if err != nil {
-				tlog("intent: ✗ DuckDuckGo fallback failed: %v", err)
+				tlog("intent: ✗ Serper fallback failed: %v", err)
 				return ""
 			}
-			tlog("intent: ✓ DuckDuckGo fallback result size=%d bytes", len(result))
+			tlog("intent: ✓ Serper fallback result size=%d bytes", len(result))
 			resultStr = extractToolResult(result)
-			tlog("intent: DuckDuckGo extracted=%s", truncateStr(resultStr, 200))
 			if isToolError(resultStr) {
-				tlog("intent: ⚠ DuckDuckGo also failed, skipping")
+				tlog("intent: ⚠ Serper also failed, skipping")
 				return ""
 			}
 		}
@@ -455,12 +456,18 @@ func extractURL(text string) string {
 // extractToolResult parses tools-bridge JSON response and returns the inner result.
 // Bridge format: {"status":"success","result":"...","error":null}
 func extractToolResult(raw []byte) string {
+	// Bridge output may have ERROR lines before JSON — find the JSON start
+	data := raw
+	if idx := bytes.IndexByte(data, '{'); idx > 0 {
+		data = data[idx:]
+	}
+
 	var bridge struct {
 		Status string          `json:"status"`
 		Result json.RawMessage `json:"result"`
 		Error  *string         `json:"error"`
 	}
-	if err := json.Unmarshal(raw, &bridge); err != nil {
+	if err := json.Unmarshal(data, &bridge); err != nil {
 		return string(raw) // not bridge format, return as-is
 	}
 
