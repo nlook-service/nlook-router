@@ -77,6 +77,11 @@ func DetectIntent(query string) *Intent {
 		return &Intent{Action: "send_notification", Query: query}
 	}
 
+	// URL detection: if query contains a URL, route to web_search (will use read_url)
+	if containsURL(q) {
+		return &Intent{Action: "web_search", Query: query}
+	}
+
 	// Web search
 	searchKeywords := []string{"날씨", "검색", "찾아", "뉴스", "weather", "search", "find", "google", "최신", "현재", "몇시", "몇 시", "공연", "일정", "경기", "오늘", "내일", "어제", "schedule", "when"}
 	if containsAny(q, searchKeywords) {
@@ -109,19 +114,34 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 			tlog("intent: ⚠ no tool executor for %s", intent.Action)
 			return ""
 		}
-		// Map intent action to actual tool name
+		// Map intent action to actual tool name + args
 		toolName := intent.Action
+		toolArgs := map[string]interface{}{"query": intent.Query}
 		if toolName == "web_search" {
-			toolName = "search_web"
+			if url := extractURL(intent.Query); url != "" {
+				toolName = "read_url"
+				toolArgs = map[string]interface{}{"url": url}
+			} else {
+				toolName = "search_web"
+			}
 		}
 		tlog("intent: 🔧 calling built-in tool: %s (tool=%s)", intent.Action, toolName)
-		result, err := toolExec.Execute(ctx, toolName, map[string]interface{}{"query": intent.Query})
+		result, err := toolExec.Execute(ctx, toolName, toolArgs)
 		if err != nil {
 			tlog("intent: ✗ tool exec failed: %v", err)
 			return fmt.Sprintf("[도구 오류: %v]", err)
 		}
 		tlog("intent: ✓ tool result size=%d bytes", len(result))
-		resultStr := string(result)
+
+		// Parse bridge response: check for nested errors
+		resultStr := extractToolResult(result)
+
+		// If search_web failed (API key missing etc), try read_url as fallback
+		if toolName == "search_web" && isToolError(resultStr) {
+			tlog("intent: ⚠ search_web returned error, no fallback available")
+			return fmt.Sprintf("[웹 검색 실패: %s. 검색 API 키가 설정되지 않았을 수 있습니다.]", resultStr)
+		}
+
 		if len(resultStr) > 3000 {
 			resultStr = resultStr[:3000] + "..."
 		}
@@ -409,4 +429,39 @@ func containsAny(text string, keywords []string) bool {
 		}
 	}
 	return false
+}
+
+var urlPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
+
+func containsURL(text string) bool {
+	return urlPattern.MatchString(text)
+}
+
+func extractURL(text string) string {
+	return urlPattern.FindString(text)
+}
+
+// extractToolResult parses tools-bridge JSON response and returns the inner result.
+// Bridge format: {"status":"success","result":"...","error":null}
+func extractToolResult(raw []byte) string {
+	var bridge struct {
+		Status string          `json:"status"`
+		Result json.RawMessage `json:"result"`
+		Error  *string         `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &bridge); err != nil {
+		return string(raw) // not bridge format, return as-is
+	}
+
+	// Unwrap result string (bridge double-encodes as JSON string)
+	var resultStr string
+	if err := json.Unmarshal(bridge.Result, &resultStr); err != nil {
+		return string(bridge.Result)
+	}
+	return resultStr
+}
+
+// isToolError checks if a tool result contains an error message.
+func isToolError(result string) bool {
+	return strings.Contains(result, `"error"`) && (strings.Contains(result, "API key") || strings.Contains(result, "error"))
 }

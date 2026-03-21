@@ -1379,7 +1379,7 @@ Categories:
 - complexity: "simple" | "complex" | "reasoning"
 
 Rules:
-- web_search: needs real-time info (time, weather, news, events, schedules, prices)
+- web_search: needs real-time info (time, weather, news, events, schedules, prices) OR contains a URL/website to read/analyze/summarize
 - calculator: explicit math operations (add, multiply, percentage)
 - create_task/create_document: user wants to create/save something
 - list_tasks/list_documents: user wants to see existing items
