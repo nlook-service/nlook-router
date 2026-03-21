@@ -136,10 +136,10 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 		// Parse bridge response: check for nested errors
 		resultStr := extractToolResult(result)
 
-		// If search_web failed (API key missing etc), try read_url as fallback
+		// If search_web failed (API key missing etc), return empty so LLM answers from knowledge
 		if toolName == "search_web" && isToolError(resultStr) {
-			tlog("intent: ⚠ search_web returned error, no fallback available")
-			return fmt.Sprintf("[웹 검색 실패: %s. 검색 API 키가 설정되지 않았을 수 있습니다.]", resultStr)
+			tlog("intent: ⚠ search_web error (likely missing API key), skipping tool result")
+			return ""
 		}
 
 		if len(resultStr) > 3000 {
