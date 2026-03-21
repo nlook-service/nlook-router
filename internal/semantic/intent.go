@@ -43,7 +43,7 @@ func DefaultIntents() []IntentCategory {
 		{Name: "writing", Complexity: "complex", MinTier: 2, PreferredTier: 2,
 			Texts: []string{"글 써줘", "블로그 작성", "번역해줘", "요약해줘", "이메일 작성", "문장 다듬어줘"}},
 		{Name: "web_search", Complexity: "complex", MinTier: 2, PreferredTier: 2,
-			Texts: []string{"날씨 어때", "검색해줘", "뉴스 알려줘", "몇시야", "실시간 정보", "최신 소식"}},
+			Texts: []string{"날씨 어때", "오늘 날씨", "검색해줘", "뉴스 알려줘", "몇시야", "실시간 정보", "최신 소식"}},
 		{Name: "deep_analysis", Complexity: "reasoning", MinTier: 3, PreferredTier: 3,
 			Texts: []string{"원인 분석", "비교 분석해줘", "전략 수립", "장단점 비교", "왜 이런 결과가", "근본 원인 파악"}},
 		{Name: "system_question", Complexity: "complex", MinTier: 2, PreferredTier: 2,
@@ -84,6 +84,7 @@ func (s *IntentStore) Initialize(ctx context.Context) error {
 }
 
 // Match finds the best matching intent for a query embedding.
+// Uses max individual vector matching (not centroid) for higher accuracy.
 func (s *IntentStore) Match(queryVec []float32) (name string, score float64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -92,13 +93,13 @@ func (s *IntentStore) Match(queryVec []float32) (name string, score float64) {
 	bestName := "general"
 
 	for _, cat := range s.intents {
-		if len(cat.Centroid) == 0 {
-			continue
-		}
-		sim := float64(cosineSimilarity(queryVec, cat.Centroid))
-		if sim > bestScore {
-			bestScore = sim
-			bestName = cat.Name
+		// Compare against each individual vector, take the max
+		for _, vec := range cat.Vectors {
+			sim := float64(cosineSimilarity(queryVec, vec))
+			if sim > bestScore {
+				bestScore = sim
+				bestName = cat.Name
+			}
 		}
 	}
 
