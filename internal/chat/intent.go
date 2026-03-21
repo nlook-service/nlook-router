@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nlook-service/nlook-router/internal/mcp"
+	"github.com/nlook-service/nlook-router/internal/tools"
 )
 
 // Executor is a tool executor interface (matches tools.Executor).
@@ -110,62 +111,62 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 		log.Printf("[%s] "+format, append([]interface{}{traceID}, args...)...)
 	}
 
-	// Built-in tool execution (web_search, calculator, etc.)
-	if intent.Action == "web_search" || intent.Action == "calculator" {
-		if toolExec == nil {
-			tlog("intent: ⚠ no tool executor for %s", intent.Action)
+	// Native Go web tools (no Python bridge overhead)
+	if intent.Action == "web_search" {
+		webTools := tools.NewWebTools()
+		toolStart := time.Now()
+
+		if url := extractURL(intent.Query); url != "" {
+			tlog("intent: 🔧 read_url (native Go)")
+			result, err := webTools.ReadURL(ctx, url)
+			elapsed := time.Since(toolStart).Milliseconds()
+			if err != nil {
+				tlog("intent: ✗ read_url failed (%dms): %v", elapsed, err)
+				return ""
+			}
+			tlog("intent: ✓ read_url size=%d chars (%dms)", len(result), elapsed)
+			return result
+		}
+
+		tlog("intent: 🔧 search_web (native Go, Serper)")
+		result, err := webTools.SearchWeb(ctx, intent.Query)
+		elapsed := time.Since(toolStart).Milliseconds()
+		if err != nil {
+			tlog("intent: ✗ search_web failed (%dms): %v", elapsed, err)
+			// Fallback to tools-bridge DuckDuckGo
+			if toolExec != nil {
+				tlog("intent: trying DuckDuckGo fallback via bridge")
+				bridgeResult, bridgeErr := toolExec.Execute(ctx, "web_search", map[string]interface{}{"query": intent.Query})
+				if bridgeErr == nil {
+					resultStr := extractToolResult(bridgeResult)
+					if !isToolError(resultStr) && len(resultStr) > 10 {
+						tlog("intent: ✓ DuckDuckGo fallback size=%d bytes", len(resultStr))
+						if len(resultStr) > 3000 {
+							resultStr = resultStr[:3000] + "\n... (truncated)"
+						}
+						return resultStr
+					}
+				}
+			}
 			return ""
 		}
-		// Map intent action to actual tool name + args
-		toolName := intent.Action
-		toolArgs := map[string]interface{}{"query": intent.Query}
-		if toolName == "web_search" {
-			if url := extractURL(intent.Query); url != "" {
-				toolName = "read_url"
-				toolArgs = map[string]interface{}{"url": url}
-			} else {
-				// Serper first (Google quality), DuckDuckGo as fallback
-				toolName = "search_web" // Serper
-			}
+		tlog("intent: ✓ search_web size=%d chars (%dms)", len(result), elapsed)
+		return result
+	}
+
+	// Calculator via tools-bridge
+	if intent.Action == "calculator" {
+		if toolExec == nil {
+			tlog("intent: ⚠ no tool executor for calculator")
+			return ""
 		}
-		tlog("intent: 🔧 calling built-in tool: %s (tool=%s)", intent.Action, toolName)
-		toolStart := time.Now()
-		result, err := toolExec.Execute(ctx, toolName, toolArgs)
-		toolElapsed := time.Since(toolStart).Milliseconds()
+		tlog("intent: 🔧 calling calculator via bridge")
+		result, err := toolExec.Execute(ctx, intent.Action, map[string]interface{}{"query": intent.Query})
 		if err != nil {
-			tlog("intent: ✗ tool exec failed (%dms): %v", toolElapsed, err)
-			return fmt.Sprintf("[도구 오류: %v]", err)
+			tlog("intent: ✗ calculator failed: %v", err)
+			return ""
 		}
-		tlog("intent: ✓ tool result size=%d bytes (%dms)", len(result), toolElapsed)
-
-		// Parse bridge response: check for nested errors
-		resultStr := extractToolResult(result)
-
-		// If Serper failed, try DuckDuckGo (web_search) as fallback
-		if toolName == "search_web" && isToolError(resultStr) {
-			tlog("intent: ⚠ Serper failed, trying DuckDuckGo fallback (web_search)")
-			result, err = toolExec.Execute(ctx, "web_search", map[string]interface{}{"query": intent.Query})
-			if err != nil {
-				tlog("intent: ✗ DuckDuckGo fallback failed: %v", err)
-				return ""
-			}
-			tlog("intent: ✓ DuckDuckGo fallback result size=%d bytes", len(result))
-			resultStr = extractToolResult(result)
-			if isToolError(resultStr) {
-				tlog("intent: ⚠ DuckDuckGo also failed, skipping")
-				return ""
-			}
-		}
-
-		// Truncate large results (read_url can return 100KB+)
-		maxLen := 3000
-		if toolName == "read_url" {
-			maxLen = 2000 // URL content: keep concise for LLM
-		}
-		if len(resultStr) > maxLen {
-			resultStr = resultStr[:maxLen] + "\n... (truncated)"
-		}
-		return resultStr
+		return extractToolResult(result)
 	}
 
 	if mcpClient == nil {
