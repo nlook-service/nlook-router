@@ -157,6 +157,7 @@ _PRIORITY_SET = {(m, c) for m, c in PRIORITY_TOOLKITS}
 # 툴킷별 커스텀 초기화 인자 (기본값이 제한적인 경우)
 _TOOLKIT_INIT_KWARGS: Dict[str, dict] = {
     "FileTools": {"base_dir": Path("/")},
+    "SerperTools": {"location": "kr", "language": "ko"},
 }
 
 
