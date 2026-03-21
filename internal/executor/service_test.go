@@ -131,6 +131,47 @@ func TestExecutionService_SkipPollingWhenWSConnected(t *testing.T) {
 	}
 }
 
+func TestExtractEvalSetID_String(t *testing.T) {
+	input := map[string]interface{}{"_eval_set_id": "abc-123"}
+	if got := extractEvalSetID(input); got != "abc-123" {
+		t.Errorf("expected abc-123, got %s", got)
+	}
+}
+
+func TestExtractEvalSetID_Float64(t *testing.T) {
+	input := map[string]interface{}{"_eval_set_id": float64(42)}
+	if got := extractEvalSetID(input); got != "42" {
+		t.Errorf("expected 42, got %s", got)
+	}
+}
+
+func TestExtractEvalSetID_Zero(t *testing.T) {
+	input := map[string]interface{}{"_eval_set_id": float64(0)}
+	if got := extractEvalSetID(input); got != "" {
+		t.Errorf("expected empty, got %s", got)
+	}
+}
+
+func TestExtractEvalSetID_Missing(t *testing.T) {
+	input := map[string]interface{}{"other": "value"}
+	if got := extractEvalSetID(input); got != "" {
+		t.Errorf("expected empty, got %s", got)
+	}
+}
+
+func TestExtractEvalSetID_Nil(t *testing.T) {
+	if got := extractEvalSetID(nil); got != "" {
+		t.Errorf("expected empty, got %s", got)
+	}
+}
+
+func TestExtractEvalSetID_EmptyString(t *testing.T) {
+	input := map[string]interface{}{"_eval_set_id": ""}
+	if got := extractEvalSetID(input); got != "" {
+		t.Errorf("expected empty, got %s", got)
+	}
+}
+
 func TestExecutionService_PollsWhenWSDisconnected(t *testing.T) {
 	mc := &mockClient{
 		workflows:   []apiclient.Workflow{{ID: 1, Title: "wf1"}},

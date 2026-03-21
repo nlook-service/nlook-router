@@ -94,8 +94,8 @@ graph TB
     WE --> SE --> SR
     SE --> GE
     SC --> EX
-    EV --> SR
-    EV -.->|StepHook| SE
+    EV -.->|StepEvalHook.OnStepComplete| SE
+    WE -.->|OnRunFinished| EV
 
     SR --> LE
     LE --> OL & VL & GM
@@ -295,13 +295,13 @@ flowchart TB
             PERF[Measure latency + tokens]
         end
 
-        subgraph StepEval["Workflow Step Eval (Phase 2)"]
-            PREP[PrepareWorkflowEval]
-            HOOK[StepEvalHook attached to StepExecutor]
-            WE2[WorkflowEngine executes]
-            CAP[Capture per-step output]
+        subgraph StepEval["Workflow Step Eval (Phase 2 — server+router)"]
+            PREP["PrepareWorkflowEval(evalSetID, executor)\n→ creates StepEvalHook, attaches via AddHook()"]
+            HOOK["StepEvalHook.OnStepComplete(StepEvent)\n→ collects StepCompleteData per node"]
+            WE2["WorkflowEngine.Execute()\n→ fires hooks after each step"]
+            CAP["OnRunFinished callback\n→ triggers FinalizeWorkflowEval()"]
             SCORE2[Score against expected per NodeID]
-            FIN[FinalizeWorkflowEval]
+            FIN["FinalizeWorkflowEval(hook, runID, wfID)\n→ aggregates EvalResult"]
         end
 
         STATS[Calculate avg / stddev]
@@ -358,8 +358,8 @@ internal/
 ├── config/         # YAML config loading
 ├── db/             # DB interface (SQLite / file-based)
 ├── embedding/      # Vector embeddings for RAG
-├── engine/         # Workflow DAG engine + StepExecutor + StepHook
-├── eval/           # Evaluation framework (accuracy + step-level)
+├── engine/         # Workflow DAG engine + StepExecutor + StepHook + OnRunFinished
+├── eval/           # Evaluation framework (accuracy + step-level via StepEvalHook)
 ├── executor/       # Run dispatch (WebSocket + polling)
 ├── gemini/         # Gemini API client (cloud fallback)
 ├── heartbeat/      # Router registration + health ping

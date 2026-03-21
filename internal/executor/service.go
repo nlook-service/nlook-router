@@ -13,6 +13,7 @@ import (
 
 	"github.com/nlook-service/nlook-router/internal/apiclient"
 	"github.com/nlook-service/nlook-router/internal/engine"
+	"github.com/nlook-service/nlook-router/internal/eval"
 )
 
 // ExecutionService polls for pending runs and executes them locally.
@@ -20,11 +21,18 @@ import (
 type ExecutionService struct {
 	client       apiclient.Interface
 	engine       *engine.WorkflowEngine
+	evalRunner   EvalRunnerInterface
 	pollInterval time.Duration
 	stopCh       chan struct{}
 	mu           sync.RWMutex
 	running      map[int64]context.CancelFunc
 	wsConnected  func() bool // returns true when WebSocket is connected
+}
+
+// EvalRunnerInterface is the subset of eval.EvalRunner needed by ExecutionService.
+type EvalRunnerInterface interface {
+	PrepareWorkflowEval(ctx context.Context, evalSetID string, opts eval.WorkflowRunOptions) (*eval.EvalRun, *eval.StepEvalHook, error)
+	FinalizeWorkflowEval(ctx context.Context, run *eval.EvalRun, hook *eval.StepEvalHook) (*eval.EvalRun, error)
 }
 
 // NewExecutionService creates a new ExecutionService.
@@ -50,6 +58,11 @@ func (s *ExecutionService) Start(ctx context.Context) {
 // When connected, polling is skipped (runs arrive via WebSocket dispatch).
 func (s *ExecutionService) SetWSConnected(fn func() bool) {
 	s.wsConnected = fn
+}
+
+// SetEvalRunner sets the eval runner for workflow-level evaluation.
+func (s *ExecutionService) SetEvalRunner(r EvalRunnerInterface) {
+	s.evalRunner = r
 }
 
 // Stop signals the poll loop to exit.
@@ -181,6 +194,21 @@ func (s *ExecutionService) executeWorkflowRun(ctx context.Context, run apiclient
 		log.Printf("executor: update run %d to running: %v", run.ID, err)
 	}
 
+	// Check for eval integration
+	var evalRun *eval.EvalRun
+	var evalHook *eval.StepEvalHook
+	if evalSetID := extractEvalSetID(run.Input); evalSetID != "" && s.evalRunner != nil {
+		var err error
+		evalRun, evalHook, err = s.evalRunner.PrepareWorkflowEval(ctx, evalSetID, eval.WorkflowRunOptions{})
+		if err != nil {
+			log.Printf("executor: prepare eval for run %d: %v (continuing without eval)", run.ID, err)
+		} else {
+			adapter := newEvalStepAdapter(evalHook)
+			s.engine.StepExecutor().AddHook(adapter)
+			log.Printf("executor: eval hook attached for run %d (eval_set=%s)", run.ID, evalSetID)
+		}
+	}
+
 	// Fetch full workflow detail
 	detail, err := s.client.GetWorkflowDetail(ctx, run.WorkflowID)
 	if err != nil {
@@ -200,6 +228,20 @@ func (s *ExecutionService) executeWorkflowRun(ctx context.Context, run apiclient
 		if updateErr := s.client.UpdateRunStatus(ctx, run.WorkflowID, run.ID, "failed", nil, errMsg); updateErr != nil {
 			log.Printf("executor: update run %d to failed: %v", run.ID, updateErr)
 		}
+	}
+
+	// Finalize eval if hook was attached
+	if evalRun != nil && evalHook != nil {
+		if _, finalErr := s.evalRunner.FinalizeWorkflowEval(ctx, evalRun, evalHook); finalErr != nil {
+			log.Printf("executor: finalize eval for run %d: %v", run.ID, finalErr)
+		} else {
+			log.Printf("executor: eval finalized for run %d (captures=%d)", run.ID, len(evalHook.Captures()))
+		}
+		// Clear hooks to prevent accumulation across runs
+		s.engine.StepExecutor().ClearHooks()
+	}
+
+	if err != nil {
 		return
 	}
 

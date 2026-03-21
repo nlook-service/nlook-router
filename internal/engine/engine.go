@@ -34,6 +34,11 @@ func (e *WorkflowEngine) SkillRunner() *SkillRunner {
 	return e.executor.skillRunner
 }
 
+// StepExecutor returns the underlying step executor for hook registration.
+func (e *WorkflowEngine) StepExecutor() *StepExecutor {
+	return e.executor
+}
+
 // Execute runs the workflow synchronously and returns the final output.
 // Status updates (running/completed/failed) are reported via apiclient.
 func (e *WorkflowEngine) Execute(ctx context.Context, detail *apiclient.WorkflowDetail, run apiclient.RunInfo) (map[string]interface{}, error) {

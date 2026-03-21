@@ -59,6 +59,11 @@ func (e *StepExecutor) AddHook(h StepHook) {
 	e.hooks = append(e.hooks, h)
 }
 
+// ClearHooks removes all registered hooks. Call between runs to prevent accumulation.
+func (e *StepExecutor) ClearHooks() {
+	e.hooks = nil
+}
+
 // LoadSkillsAndAgents pre-loads skills and agents from workflow detail into lookup maps.
 func (e *StepExecutor) LoadSkillsAndAgents(skills []apiclient.WorkflowSkill, agents []apiclient.WorkflowAgent) {
 	e.skills = make(map[int64]*apiclient.WorkflowSkill, len(skills))
