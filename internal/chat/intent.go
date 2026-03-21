@@ -123,8 +123,8 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 				toolName = "read_url"
 				toolArgs = map[string]interface{}{"url": url}
 			} else {
-				// DuckDuckGo first (free, no API key), Serper as fallback
-				toolName = "web_search" // DuckDuckGo
+				// Serper first (Google quality), DuckDuckGo as fallback
+				toolName = "search_web" // Serper
 			}
 		}
 		tlog("intent: 🔧 calling built-in tool: %s (tool=%s)", intent.Action, toolName)
@@ -138,18 +138,18 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 		// Parse bridge response: check for nested errors
 		resultStr := extractToolResult(result)
 
-		// If DuckDuckGo failed, try Serper (search_web) as fallback
-		if toolName == "web_search" && isToolError(resultStr) {
-			tlog("intent: ⚠ DuckDuckGo failed, trying Serper fallback (search_web)")
-			result, err = toolExec.Execute(ctx, "search_web", map[string]interface{}{"query": intent.Query})
+		// If Serper failed, try DuckDuckGo (web_search) as fallback
+		if toolName == "search_web" && isToolError(resultStr) {
+			tlog("intent: ⚠ Serper failed, trying DuckDuckGo fallback (web_search)")
+			result, err = toolExec.Execute(ctx, "web_search", map[string]interface{}{"query": intent.Query})
 			if err != nil {
-				tlog("intent: ✗ Serper fallback failed: %v", err)
+				tlog("intent: ✗ DuckDuckGo fallback failed: %v", err)
 				return ""
 			}
-			tlog("intent: ✓ Serper fallback result size=%d bytes", len(result))
+			tlog("intent: ✓ DuckDuckGo fallback result size=%d bytes", len(result))
 			resultStr = extractToolResult(result)
 			if isToolError(resultStr) {
-				tlog("intent: ⚠ Serper also failed, skipping")
+				tlog("intent: ⚠ DuckDuckGo also failed, skipping")
 				return ""
 			}
 		}
