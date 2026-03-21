@@ -62,9 +62,16 @@ type Client struct {
 	// Callback for incoming messages (generic — for SSH etc.)
 	OnMessage func(msgType string, payload json.RawMessage)
 
-	connected     bool
-	connectedMu   sync.RWMutex
-	maxReconnect  time.Duration
+	connected        bool
+	connectedMu      sync.RWMutex
+	maxReconnect     time.Duration
+	sysInfoCollector func(ctx context.Context) (interface{}, error)
+}
+
+// SetSysInfoCollector sets a function that collects system resource info.
+// When set, system resources are sent alongside each heartbeat.
+func (c *Client) SetSysInfoCollector(fn func(ctx context.Context) (interface{}, error)) {
+	c.sysInfoCollector = fn
 }
 
 // NewClient creates a new WebSocket client.
@@ -311,6 +318,11 @@ func (c *Client) writePump(ctx context.Context, readDone <-chan struct{}) {
 			}
 		case <-heartbeat.C:
 			_ = c.SendMessage("heartbeat", map[string]string{"router_id": c.routerID})
+			if c.sysInfoCollector != nil {
+				if res, err := c.sysInfoCollector(context.Background()); err == nil {
+					_ = c.SendMessage("system:resources", res)
+				}
+			}
 		case <-ping.C:
 			c.mu.Lock()
 			conn := c.conn

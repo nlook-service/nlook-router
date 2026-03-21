@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/nlook-service/nlook-router/internal/ollama"
+	"github.com/nlook-service/nlook-router/internal/sysinfo"
 )
 
 func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
@@ -189,6 +190,23 @@ func (s *Server) sessionDetailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(sess)
+}
+
+// systemResourcesHandler returns local PC system resource info.
+func (s *Server) systemResourcesHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	resources, err := sysinfo.Collect(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(resources)
 }
 
 func (s *Server) handleSessionTraces(w http.ResponseWriter, sessionID string) {

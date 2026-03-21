@@ -9,4 +9,5 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/status/model", s.modelStatusHandler)
 	s.mux.HandleFunc("/sessions", s.sessionsHandler)
 	s.mux.HandleFunc("/sessions/", s.sessionDetailHandler)
+	s.mux.HandleFunc("/system/resources", s.systemResourcesHandler)
 }

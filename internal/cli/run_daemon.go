@@ -33,6 +33,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/tracing"
+	"github.com/nlook-service/nlook-router/internal/sysinfo"
 	"github.com/nlook-service/nlook-router/internal/usage"
 	"github.com/nlook-service/nlook-router/internal/ws"
 )
@@ -334,6 +335,11 @@ func RunDaemon(cfg *config.Config) error {
 
 		// Tell executor to skip polling when WebSocket is connected
 		execService.SetWSConnected(wsClient.IsConnected)
+
+		// Send system resources alongside heartbeat
+		wsClient.SetSysInfoCollector(func(ctx context.Context) (interface{}, error) {
+			return sysinfo.Collect(ctx)
+		})
 
 		wsClient.Start(ctx)
 	}
