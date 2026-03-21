@@ -130,7 +130,7 @@ func RunDaemon(cfg *config.Config) error {
 	}
 
 	// Reasoning engine: enables step-by-step reasoning for LLM calls
-	reasoningCaller := reasoning.NewFuncCaller(skillRunner.CallLLM, nil)
+	reasoningCaller := reasoning.NewFuncCaller(skillRunner.CallLLM, skillRunner.CallLLMStream)
 	reasoningMgr := reasoning.NewManager(reasoningCaller)
 	skillRunner.SetReasoningManager(reasoningMgr)
 	log.Println("reasoning: manager initialized")
@@ -301,6 +301,10 @@ func RunDaemon(cfg *config.Config) error {
 		chatHandler.SetSessionStore(sessionStore)
 		chatHandler.SetTracer(traceCollector)
 		chatHandler.SetReasoningManager(reasoningMgr)
+		if cfg.ReasoningModel != "" {
+			chatHandler.SetReasoningModel(cfg.ReasoningModel)
+			log.Printf("chat: reasoning model set to %s", cfg.ReasoningModel)
+		}
 		if toolsBridge != nil {
 			chatHandler.SetToolExecutor(toolsBridge)
 			log.Printf("chat: built-in tools connected (web_search, code_interpreter, etc.)")

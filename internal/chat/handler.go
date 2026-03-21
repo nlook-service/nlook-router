@@ -123,7 +123,8 @@ type Handler struct {
 	sessions      *session.Store
 	tracer        *tracing.Collector
 	storage       db.DB // optional: for persisting chat messages locally
-	reasoningMgr  *reasoning.Manager
+	reasoningMgr   *reasoning.Manager
+	reasoningModel string // e.g. "claude-sonnet-4-6", from config.yaml reasoning_model
 }
 
 // SetLLMEngine sets the LLM engine (vLLM or Ollama).
@@ -134,6 +135,11 @@ func (h *Handler) SetLLMEngine(e *llm.Engine) {
 // SetReasoningManager sets the reasoning manager for thinking-mode chat.
 func (h *Handler) SetReasoningManager(mgr *reasoning.Manager) {
 	h.reasoningMgr = mgr
+}
+
+// SetReasoningModel sets the default model for reasoning mode (from config.yaml).
+func (h *Handler) SetReasoningModel(model string) {
+	h.reasoningModel = model
 }
 
 // SetToolExecutor sets the built-in tool executor (web_search, code_interpreter, etc.)
@@ -460,8 +466,14 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 
 	// If reasoning mode, route through reasoning manager
 	if reasoningEnabled && h.reasoningMgr != nil {
-		tlog("route: reasoning mode (model=%s)", model)
-		resp, err := h.processChatReasoning(ctx, req, model)
+		reasonModel := model
+		if h.reasoningModel != "" {
+			reasonModel = h.reasoningModel
+			tlog("route: reasoning mode (config model=%s, requested=%s)", reasonModel, model)
+		} else {
+			tlog("route: reasoning mode (model=%s)", reasonModel)
+		}
+		resp, err := h.processChatReasoning(ctx, req, reasonModel)
 		if err != nil {
 			tlog("reasoning failed, fallback to normal: %v", err)
 		} else {
@@ -505,9 +517,21 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		} // end !hasRefs
 	}
 
-	// Classify complexity: simple → local model, complex → cloud model
+	// Classify complexity: simple → local model, complex → cloud, reasoning → Claude reasoning
 	localModel := h.findLocalModel(ctx, model)
 	complexity := h.classifyWithQwen(ctx, req.Query, localModel, tlog)
+
+	// Auto reasoning: if classified as "reasoning" and reasoning manager + model configured
+	if complexity == "reasoning" && h.reasoningMgr != nil && h.reasoningModel != "" {
+		tlog("route: auto-reasoning (model=%s)", h.reasoningModel)
+		resp, err := h.processChatReasoning(ctx, req, h.reasoningModel)
+		if err != nil {
+			tlog("route: auto-reasoning failed: %v, fallback to complex", err)
+			complexity = "complex" // fallback
+		} else {
+			return resp, nil
+		}
+	}
 
 	// Step 1: Always try local model with tool calling first (MCP function calling)
 	// gemma3 can call MCP tools (create_document, send_notification, etc.)
@@ -1312,11 +1336,27 @@ func (h *Handler) classifyWithQwen(ctx context.Context, query string, localModel
 		return "simple"
 	}
 
-	classifyPrompt := fmt.Sprintf(
-		`Classify as "simple" or "complex". Reply ONE word only.
+	// Keyword fast-path for reasoning (skip qwen for clear reasoning tasks)
+	lowerQuery := strings.ToLower(classifyQuery)
+	reasoningKeywords := []string{
+		"분석해", "비교해", "전략", "원인", "파악", "계획 세워", "계획 수립",
+		"왜 이런", "장단점", "평가해", "검토해", "추론", "판단해",
+		"analyze", "compare", "strategy", "root cause", "evaluate", "assess",
+		"pros and cons", "trade-off", "reason about", "plan for",
+	}
+	for _, kw := range reasoningKeywords {
+		if strings.Contains(lowerQuery, kw) {
+			tlog("classify: keyword → reasoning (%s)", kw)
+			return "reasoning"
+		}
+	}
 
-simple examples: 하이, 안녕, 뭐해, 할일 보여줘, 목록 조회, 감사합니다, hi, thanks, show tasks
-complex examples: 블로그 작성해줘, 이 코드 분석해줘, SEO 전략 설명해, 보고서 만들어줘
+	classifyPrompt := fmt.Sprintf(
+		`Classify as "simple", "complex", or "reasoning". Reply ONE word only.
+
+simple: greetings, short Q&A, status checks, listing items (하이, 안녕, 할일 보여줘, hi, show tasks)
+complex: writing, translation, code generation, document creation (블로그 작성해줘, 번역해줘, 코드 짜줘)
+reasoning: multi-step analysis, planning, strategy, comparison, problem-solving, data interpretation (이 데이터 분석해서 전략 세워줘, 장단점 비교해줘, 원인 파악해줘, 왜 이런 현상이 발생하는지 설명해, 계획 수립해줘)
 
 Message: %s`, classifyQuery)
 
@@ -1337,109 +1377,15 @@ Message: %s`, classifyQuery)
 	}
 
 	result = strings.TrimSpace(strings.ToLower(result))
+	if strings.Contains(result, "reasoning") {
+		tlog("classify: qwen → reasoning (in=%d out=%d)", inTok, outTok)
+		return "reasoning"
+	}
 	if strings.Contains(result, "simple") {
 		tlog("classify: qwen → simple (in=%d out=%d)", inTok, outTok)
 		return "simple"
 	}
 	tlog("classify: qwen → complex (in=%d out=%d)", inTok, outTok)
-	return "complex"
-}
-
-// classifyComplexity determines if a query is "simple" or "complex".
-// Uses fast keyword check first, then qwen LLM for ambiguous cases.
-func (h *Handler) classifyComplexity(ctx context.Context, query string, localModel string, tlog func(string, ...interface{})) string {
-	clean := strings.TrimSpace(query)
-
-	// Strip tool result prefix for classification
-	classifyQuery := clean
-	if idx := strings.Index(clean, "[Tool Result:"); idx >= 0 {
-		classifyQuery = clean[:idx]
-	}
-	classifyQuery = strings.TrimSpace(classifyQuery)
-
-	// 1. Very short = simple (greetings, yes/no)
-	if len(classifyQuery) < 10 {
-		return "simple"
-	}
-
-	// 2. Keywords → complex
-	complexKeywords := []string{
-		"작성해", "써줘", "만들어", "분석해", "비교해", "요약해", "번역해",
-		"설명해", "자세히", "왜", "어떻게 하면",
-		"등록", "저장", "생성", "추가해", "넣어", "기록",
-		"문서", "할일", "할 일", "메모", "노트",
-		"SEO", "마케팅", "블로그", "리포트", "보고서", "코드",
-		"write", "analyze", "summarize", "translate", "explain",
-		"generate", "create", "draft", "compare", "how to",
-		"save", "register", "add", "document", "task", "note",
-	}
-	lower := strings.ToLower(classifyQuery)
-	for _, kw := range complexKeywords {
-		if strings.Contains(lower, strings.ToLower(kw)) {
-			return "complex"
-		}
-	}
-
-	// 2b. Long content (>500 chars) → complex (likely pasted web content or detailed request)
-	if len(classifyQuery) > 500 {
-		return "complex"
-	}
-
-	// 3. Keywords → simple
-	simpleKeywords := []string{
-		"목록", "조회", "보여줘", "알려줘", "뭐야", "몇개",
-		"list", "show", "what", "how many", "check",
-	}
-	for _, kw := range simpleKeywords {
-		if strings.Contains(lower, strings.ToLower(kw)) {
-			return "simple"
-		}
-	}
-
-	// 4. Tool results attached → complex (needs reasoning over data)
-	if strings.Contains(clean, "[Tool Result:") {
-		return "complex"
-	}
-
-	// 5. Medium length without clear keywords → use qwen to classify
-	if localModel != "" {
-		ollamaClient := ollama.NewClient()
-		if ollamaClient.IsRunning(ctx) {
-			classifyPrompt := fmt.Sprintf(
-				`Classify this user message as "simple" or "complex".
-Simple: greetings, status checks, listing items, short Q&A, basic CRUD.
-Complex: writing, analysis, comparison, explanation, code generation, document creation.
-
-Reply with ONLY one word: simple or complex
-
-Message: %s`, classifyQuery)
-
-			result, inTok, outTok, err := ollamaClient.ChatStream(ctx, localModel, "", classifyPrompt,
-				ollama.ChatOptions{MaxTokens: 5, Temperature: 0.0},
-				nil,
-			)
-			if err == nil {
-				// Track classifier token usage
-				if h.usageTracker != nil {
-					h.usageTracker.Record(usage.TokenUsage{
-						Provider: "ollama", Model: localModel, Category: "intent",
-						InputTokens: inTok, OutputTokens: outTok,
-					})
-				}
-				result = strings.TrimSpace(strings.ToLower(result))
-				if strings.Contains(result, "simple") {
-					tlog("classify: qwen → simple (in=%d out=%d)", inTok, outTok)
-					return "simple"
-				}
-				if strings.Contains(result, "complex") {
-					tlog("classify: qwen → complex (in=%d out=%d)", inTok, outTok)
-					return "complex"
-				}
-			}
-		}
-	}
-
-	// Default: complex (safer to use better model)
 	return "complex"
 }
 

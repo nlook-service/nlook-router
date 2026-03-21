@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -749,4 +751,106 @@ func (r *SkillRunner) CallLLM(ctx context.Context, model, system, prompt string,
 
 	text, _ := result["text"].(string)
 	return text, 0, nil
+}
+
+// CallLLMStream is a streaming variant of CallLLM for reasoning.
+// For Claude models, uses CLI --output-format stream-json for real-time deltas.
+// For other models, falls back to non-streaming CallLLM.
+func (r *SkillRunner) CallLLMStream(ctx context.Context, model, system, prompt string, temp float64, maxTokens int, onDelta func(string)) (string, int, error) {
+	if strings.HasPrefix(model, "claude") || strings.HasPrefix(model, "anthropic") {
+		return r.callClaudeCLIStream(ctx, model, system, prompt, maxTokens, onDelta)
+	}
+	// Fallback: non-streaming for other models
+	text, tokens, err := r.CallLLM(ctx, model, system, prompt, temp, maxTokens)
+	if err != nil {
+		return "", 0, err
+	}
+	if onDelta != nil {
+		onDelta(text)
+	}
+	return text, tokens, nil
+}
+
+// callClaudeCLIStream calls Claude CLI with stream-json output format.
+func (r *SkillRunner) callClaudeCLIStream(ctx context.Context, model, system, prompt string, maxTokens int, onDelta func(string)) (string, int, error) {
+	claudePath := findClaudeCLI()
+	if claudePath == "" {
+		// No CLI: fall back to non-streaming API call
+		result, _, err := r.callAnthropicAPI(ctx, model, system, prompt, 0.7, maxTokens, nil)
+		if err != nil {
+			return "", 0, err
+		}
+		text, _ := result["text"].(string)
+		if onDelta != nil {
+			onDelta(text)
+		}
+		return text, 0, nil
+	}
+
+	var fullPrompt strings.Builder
+	if system != "" {
+		fullPrompt.WriteString(system)
+		fullPrompt.WriteString("\n\n")
+	}
+	fullPrompt.WriteString(prompt)
+
+	args := []string{"-p", fullPrompt.String(), "--model", model, "--output-format", "stream-json"}
+	cmd := exec.CommandContext(ctx, claudePath, args...)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", 0, fmt.Errorf("claude CLI stream pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return "", 0, fmt.Errorf("claude CLI stream start: %w", err)
+	}
+
+	var fullText strings.Builder
+	var totalTokens int
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		var event struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+			Result  string `json:"result"`
+			Usage   struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+
+		switch event.Type {
+		case "content":
+			if event.Content != "" {
+				fullText.WriteString(event.Content)
+				if onDelta != nil {
+					onDelta(event.Content)
+				}
+			}
+		case "result":
+			if event.Result != "" && fullText.Len() == 0 {
+				fullText.WriteString(event.Result)
+				if onDelta != nil {
+					onDelta(event.Result)
+				}
+			}
+			totalTokens = event.Usage.InputTokens + event.Usage.OutputTokens
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
+		log.Printf("claude CLI stream wait: %v", err)
+	}
+
+	return fullText.String(), totalTokens, nil
 }
