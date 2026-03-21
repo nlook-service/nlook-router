@@ -159,16 +159,16 @@ var (
 )
 
 func initPython() {
-	// Find tokenize.py
+	// Find nlook_tokenize.py (renamed from tokenize.py to avoid shadowing stdlib)
 	exePath, _ := os.Executable()
 	candidates := []string{
-		filepath.Join(filepath.Dir(exePath), "tools-bridge", "tokenize.py"),
-		filepath.Join(filepath.Dir(exePath), "..", "tools-bridge", "tokenize.py"),
-		"tools-bridge/tokenize.py",
+		filepath.Join(filepath.Dir(exePath), "tools-bridge", "nlook_tokenize.py"),
+		filepath.Join(filepath.Dir(exePath), "..", "tools-bridge", "nlook_tokenize.py"),
+		"tools-bridge/nlook_tokenize.py",
 	}
 	// Check config tools_bridge_dir
 	home, _ := os.UserHomeDir()
-	candidates = append(candidates, filepath.Join(home, ".nlook", "tools-bridge", "tokenize.py"))
+	candidates = append(candidates, filepath.Join(home, ".nlook", "tools-bridge", "nlook_tokenize.py"))
 
 	for _, path := range candidates {
 		if _, err := os.Stat(path); err == nil {

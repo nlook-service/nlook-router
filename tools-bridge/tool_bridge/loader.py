@@ -4,6 +4,7 @@
 필요 시 환경 설정(환경 변수·패키지 설치) 가이드를 참고하면 됩니다.
 """
 
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 # Agno public API only
@@ -141,20 +142,53 @@ AGNO_TOOLKITS: list[tuple[str, str]] = [
 ]
 
 
+# 우선순위 도구: 마지막에 로드되어 이름 충돌 시 이 구현이 최종 사용됨.
+# FileTools의 read_file/list_files가 PythonTools보다 유연 (경로 제한 없음).
+PRIORITY_TOOLKITS: list[tuple[str, str]] = [
+    ("file", "FileTools"),
+    ("shell", "ShellTools"),
+    ("calculator", "CalculatorTools"),
+    ("sleep", "SleepTools"),
+]
+
+_PRIORITY_SET = {(m, c) for m, c in PRIORITY_TOOLKITS}
+
+
+# 툴킷별 커스텀 초기화 인자 (기본값이 제한적인 경우)
+_TOOLKIT_INIT_KWARGS: Dict[str, dict] = {
+    "FileTools": {"base_dir": Path("/")},
+}
+
+
 def _load_one_toolkit(module_path: str, class_name: str) -> "Optional[Toolkit]":
-    """Import and instantiate one toolkit. Returns None on any failure (에러 나는 항목은 제외)."""
+    """Import and instantiate one toolkit. Returns None on any failure."""
+    import sys as _sys
     try:
         mod = __import__(f"agno.tools.{module_path}", fromlist=[class_name])
         cls = getattr(mod, class_name)
-        return cls()
-    except Exception:
+        kwargs = _TOOLKIT_INIT_KWARGS.get(class_name, {})
+        return cls(**kwargs)
+    except ImportError as e:
+        print(f"[tools] skip {class_name}: missing package ({e})", file=_sys.stderr)
+        return None
+    except Exception as e:
+        if "API" in str(e).upper() or "KEY" in str(e).upper():
+            print(f"[tools] skip {class_name}: API key not configured", file=_sys.stderr)
         return None
 
 
 def load_default_toolkits() -> Dict[str, Function]:
-    """Load all Agno toolkits. Each is tried in isolation; 에러 나는 항목은 제외되고 성공한 것만 반환."""
+    """Load all Agno toolkits. Priority toolkits load last to win name conflicts."""
     toolkits: list[Toolkit] = []
+    # 1) Load non-priority toolkits first
     for mod_path, class_name in AGNO_TOOLKITS:
+        if (mod_path, class_name) in _PRIORITY_SET:
+            continue
+        tk = _load_one_toolkit(mod_path, class_name)
+        if tk is not None:
+            toolkits.append(tk)
+    # 2) Load priority toolkits last (wins name conflicts)
+    for mod_path, class_name in PRIORITY_TOOLKITS:
         tk = _load_one_toolkit(mod_path, class_name)
         if tk is not None:
             toolkits.append(tk)

@@ -11,8 +11,17 @@ import (
 
 // requiredSafeTools are tools that must succeed in --test-all with default SAFE_TEST_ARGS.
 var requiredSafeTools = []string{
+	// Calculator
 	"add", "subtract", "multiply", "divide", "sleep",
 	"square_root", "factorial", "exponentiate", "is_prime",
+	// Web Search
+	"search_web", "search_news",
+	// File I/O
+	"save_file", "read_file", "list_files", "search_files", "search_content",
+	// Code / Shell
+	"run_python_code", "run_shell",
+	// Web
+	"get_top_hackernews_stories",
 }
 
 // TestCLIBridge_ListTools_integration runs the real Python tools-bridge if available.
@@ -34,15 +43,14 @@ func TestCLIBridge_ListTools_integration(t *testing.T) {
 	if len(list) == 0 {
 		t.Fatal("expected at least one tool")
 	}
-	var hasAdd bool
-	for _, t := range list {
-		if t.Name == "add" {
-			hasAdd = true
-			break
-		}
+	nameSet := make(map[string]bool)
+	for _, tool := range list {
+		nameSet[tool.Name] = true
 	}
-	if !hasAdd {
-		t.Errorf("expected 'add' in tool list, got %v", list)
+	for _, required := range []string{"add", "search_web", "read_file", "run_python_code"} {
+		if !nameSet[required] {
+			t.Errorf("expected %q in tool list", required)
+		}
 	}
 }
 
@@ -91,7 +99,7 @@ func TestCLIBridge_TestAll_integration(t *testing.T) {
 	if _, err := os.Stat(bridgeDir); err != nil {
 		t.Skipf("tools-bridge dir not found: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	bridge := DefaultCLIBridge(bridgeDir)
 	bridge.Command = "python3"

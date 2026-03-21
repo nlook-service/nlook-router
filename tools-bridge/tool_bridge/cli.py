@@ -15,6 +15,7 @@ from .loader import load_default_toolkits, tools_to_list
 
 # 툴별 최소 인자 (--test-all 시 사용). 없으면 {} 로 호출.
 SAFE_TEST_ARGS: Dict[str, dict] = {
+    # Calculator
     "add": {"a": 1, "b": 2},
     "subtract": {"a": 5, "b": 2},
     "multiply": {"a": 2, "b": 3},
@@ -24,6 +25,26 @@ SAFE_TEST_ARGS: Dict[str, dict] = {
     "is_prime": {"n": 7},
     "square_root": {"n": 4},
     "sleep": {"seconds": 0},
+    # Web Search (SerperTools param: query only)
+    "search_web": {"query": "test"},
+    "search_news": {"query": "test"},
+    # File (PythonTools overrides FileTools for read_file/list_files)
+    "save_file": {"contents": "nlook-test", "file_name": "/tmp/nlook-tools-test.txt"},
+    "read_file": {"file_name": "/tmp/nlook-tools-test.txt"},
+    "list_files": {},
+    "write_file": {"content": "nlook-test", "filename": "nlook-tools-test2.txt", "directory": "/tmp"},
+    "search_files": {"pattern": "*.txt"},
+    "search_content": {"query": "nlook"},
+    # Code
+    "run_python_code": {"code": "print(1+1)"},
+    # Shell (ShellTools uses args list, CodingTools uses command string)
+    "run_shell": {"command": "echo ok"},
+    "run_shell_command": {"args": ["echo", "ok"]},
+    # HackerNews
+    "get_top_hackernews_stories": {"num_stories": 1},
+    # Web
+    "read_url": {"url": "https://httpbin.org/get"},
+    "scrape_webpage": {"url": "https://httpbin.org/get"},
 }
 
 
@@ -89,9 +110,11 @@ def _test_all_cmd(functions: Dict[str, Function]) -> None:
     import json as _json
     # execute() 중 Agno가 stdout에 로그할 수 있으므로, 툴 실행 시에는 stdout을 버퍼로 돌려 JSON만 실제 stdout에 출력
     real_stdout = sys.stdout
+    real_stderr = sys.stderr
     results: list[Dict[str, Any]] = []
     for name in sorted(functions.keys()):
         sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
         try:
             args = SAFE_TEST_ARGS.get(name, {})
             args_str = _json.dumps(args)
@@ -107,8 +130,11 @@ def _test_all_cmd(functions: Dict[str, Function]) -> None:
                 results.append({"name": name, "status": "success", "error": None})
             else:
                 results.append({"name": name, "status": "failure", "error": result.error})
+        except Exception as e:
+            results.append({"name": name, "status": "failure", "error": str(e)})
         finally:
             sys.stdout = real_stdout
+            sys.stderr = real_stderr
     json.dump(results, sys.stdout, indent=0, ensure_ascii=False)
     sys.stdout.write("\n")
 

@@ -3,90 +3,82 @@ package tools
 import "github.com/nlook-service/nlook-router/internal/apiclient"
 
 // BuiltInTools returns the default set of tools available on every router.
+// Names match actual Agno toolkit function names for direct bridge execution.
 func BuiltInTools() []apiclient.ToolMeta {
 	return []apiclient.ToolMeta{
-		// HTTP / API
+		// Web Search (SerperTools)
 		{
-			Name:        "web_search",
+			Name:        "search_web",
 			Description: "Search the web and return results",
 			Category:    "web",
 		},
 		{
-			Name:        "web_fetch",
-			Description: "Fetch content from a URL",
+			Name:        "search_news",
+			Description: "Search news articles",
 			Category:    "web",
 		},
 		{
-			Name:        "http_request",
-			Description: "Make HTTP requests (GET, POST, PUT, DELETE) to external APIs",
-			Category:    "api",
-		},
-
-		// Code / Script
-		{
-			Name:        "code_interpreter",
-			Description: "Execute Python code and return results",
-			Category:    "code",
+			Name:        "read_url",
+			Description: "Fetch and read content from a URL",
+			Category:    "web",
 		},
 		{
-			Name:        "calculator",
-			Description: "Evaluate mathematical expressions",
-			Category:    "code",
-		},
-
-		// File System
-		{
-			Name:        "file_read",
-			Description: "Read file contents from local filesystem",
-			Category:    "file",
-		},
-		{
-			Name:        "file_write",
-			Description: "Write content to a file on local filesystem",
-			Category:    "file",
-		},
-		{
-			Name:        "csv_reader",
-			Description: "Parse and query CSV/Excel files",
-			Category:    "file",
-		},
-
-		// Database
-		{
-			Name:        "sql_query",
-			Description: "Execute SQL queries on configured databases",
-			Category:    "database",
-		},
-		{
-			Name:        "vector_search",
-			Description: "Semantic search over vector database",
-			Category:    "database",
-		},
-
-		// Message / Notification
-		{
-			Name:        "send_email",
-			Description: "Send email notifications",
-			Category:    "message",
-		},
-		{
-			Name:        "send_slack",
-			Description: "Send messages to Slack channels",
-			Category:    "message",
-		},
-
-		// Web / Browser
-		{
-			Name:        "browser_scrape",
+			Name:        "scrape_webpage",
 			Description: "Scrape web pages and extract structured data",
 			Category:    "web",
 		},
 
-		// Image
+		// Code / Script (PythonTools, ShellTools)
 		{
-			Name:        "image_gen",
-			Description: "Generate images from text descriptions",
+			Name:        "run_python_code",
+			Description: "Execute Python code and return results",
 			Category:    "code",
+		},
+		{
+			Name:        "run_shell",
+			Description: "Run a shell command",
+			Category:    "code",
+		},
+
+		// Calculator (CalculatorTools)
+		{
+			Name:        "add",
+			Description: "Add two numbers",
+			Category:    "math",
+		},
+
+		// File System (FileTools)
+		{
+			Name:        "read_file",
+			Description: "Read file contents from local filesystem",
+			Category:    "file",
+		},
+		{
+			Name:        "save_file",
+			Description: "Write content to a file on local filesystem",
+			Category:    "file",
+		},
+		{
+			Name:        "list_files",
+			Description: "List files in a directory",
+			Category:    "file",
+		},
+		{
+			Name:        "search_files",
+			Description: "Search files by pattern",
+			Category:    "file",
+		},
+		{
+			Name:        "search_content",
+			Description: "Search content within files",
+			Category:    "file",
+		},
+
+		// HackerNews
+		{
+			Name:        "get_top_hackernews_stories",
+			Description: "Get top stories from HackerNews",
+			Category:    "web",
 		},
 	}
 }
