@@ -90,9 +90,9 @@ func (r *Router) IntentStore() *IntentStore {
 func (r *Router) scoreTier(score float64, intent string) int {
 	cat := r.intentStore.Get(intent)
 
-	// Low confidence: no clear match → use Haiku to classify properly
+	// Low confidence: no clear match → local model (fast, free)
 	if score < r.thresholds.Tier3 {
-		return 2 // Haiku can handle ambiguous queries
+		return 1 // gemma3: simple/ambiguous queries don't need expensive models
 	}
 
 	// Confident match: use category's complexity to determine tier
