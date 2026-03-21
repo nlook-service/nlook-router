@@ -46,6 +46,18 @@ type Config struct {
 
 	// Eval settings
 	Eval EvalConfig `yaml:"eval,omitempty"`
+
+	// Tool result compression settings
+	Compression CompressionConfig `yaml:"compression,omitempty"`
+}
+
+// CompressionConfig holds settings for tool result compression.
+type CompressionConfig struct {
+	Enabled      bool   `yaml:"enabled"`                // default: true
+	MaxTokens    int    `yaml:"max_tokens,omitempty"`    // per-result token budget, default: 800
+	LLMModel     string `yaml:"llm_model,omitempty"`     // model for LLM compression
+	LLMThreshold int    `yaml:"llm_threshold,omitempty"` // use LLM only above this, default: 1200
+	RuleMaxItems int    `yaml:"rule_max_items,omitempty"` // max JSON array items, default: 10
 }
 
 // DBConfig holds settings for the unified storage layer.
@@ -124,6 +136,24 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Eval.TimeoutSeconds == 0 {
 		c.Eval.TimeoutSeconds = 120
+	}
+	// Compression defaults: enabled by default when not configured
+	if c.Compression.MaxTokens == 0 && c.Compression.LLMThreshold == 0 && c.Compression.RuleMaxItems == 0 {
+		// No compression config at all → use defaults (enabled)
+		c.Compression.Enabled = true
+		c.Compression.MaxTokens = 800
+		c.Compression.LLMThreshold = 1200
+		c.Compression.RuleMaxItems = 10
+	} else {
+		if c.Compression.MaxTokens == 0 {
+			c.Compression.MaxTokens = 800
+		}
+		if c.Compression.LLMThreshold == 0 {
+			c.Compression.LLMThreshold = 1200
+		}
+		if c.Compression.RuleMaxItems == 0 {
+			c.Compression.RuleMaxItems = 10
+		}
 	}
 	return &c, nil
 }

@@ -141,9 +141,6 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 					resultStr := extractToolResult(bridgeResult)
 					if !isToolError(resultStr) && len(resultStr) > 10 {
 						tlog("intent: ✓ DuckDuckGo fallback size=%d bytes", len(resultStr))
-						if len(resultStr) > 3000 {
-							resultStr = resultStr[:3000] + "\n... (truncated)"
-						}
 						return resultStr
 					}
 				}
@@ -223,12 +220,13 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 	data, _ := json.MarshalIndent(result, "", "  ")
 	tlog("intent: ✓ result size=%d bytes", len(data))
 
-	// Truncate large results to prevent slow LLM processing
-	const maxResultSize = 1500
+	// Compression is applied at the handler level (compressToolResult).
+	// Keep a safety limit for edge cases (e.g. compression disabled).
+	const maxResultSize = 8000
 	resultStr := string(data)
 	if len(resultStr) > maxResultSize {
-		resultStr = resultStr[:maxResultSize] + "\n... (truncated, showing first items)"
-		tlog("intent: ⚠ truncated from %d to %d bytes", len(data), maxResultSize)
+		resultStr = resultStr[:maxResultSize] + "\n... (truncated)"
+		tlog("intent: ⚠ safety truncated from %d to %d bytes", len(data), maxResultSize)
 	}
 	return resultStr
 }

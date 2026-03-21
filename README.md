@@ -61,6 +61,7 @@ graph TB
             GE[Group Executor]
             SC[Scheduler]
             EV[Eval Framework]
+            CP[Compression]
         end
 
         subgraph Reasoning["Reasoning Layer"]
@@ -96,6 +97,7 @@ graph TB
 
     WS --> CH & EX & AH & SH & SY
 
+    CH --> CP
     CH --> RM
     CH --> SS & CS & VS & MS
     EX --> WE
@@ -374,6 +376,7 @@ internal/
 ├── cache/          # Document/task cache (synced from cloud)
 ├── chat/           # AI chat: intent → prompt → LLM → response
 ├── cli/            # Cobra CLI commands
+├── compression/    # Tool result compression (rule + LLM hybrid)
 ├── config/         # YAML config loading
 ├── db/             # DB interface (SQLite / file-based)
 ├── embedding/      # Vector embeddings for RAG
@@ -442,6 +445,12 @@ agent:
   max_sessions: 5
   session_timeout: 60m
   allowed_commands: ["claude"]
+
+compression:
+  enabled: true                  # tool result compression
+  max_tokens: 800                # per-result token budget
+  llm_threshold: 1200            # use LLM compression above this
+  rule_max_items: 10             # max JSON array items to keep
 ```
 
 Env overrides: `NLOOK_API_URL`, `NLOOK_API_KEY`, `NLOOK_LLM_ENGINE`, `NLOOK_AI_MODEL`, `VLLM_BASE_URL`

@@ -28,6 +28,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/reasoning"
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/agentproxy"
+	"github.com/nlook-service/nlook-router/internal/compression"
 	"github.com/nlook-service/nlook-router/internal/db"
 	"github.com/nlook-service/nlook-router/internal/session"
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
@@ -308,6 +309,19 @@ func RunDaemon(cfg *config.Config) error {
 		if toolsBridge != nil {
 			chatHandler.SetToolExecutor(toolsBridge)
 			log.Printf("chat: built-in tools connected (web_search, code_interpreter, etc.)")
+		}
+
+		// Wire tool result compression (defaults set in config.Load)
+		compCfg := compression.Config{
+			Enabled:      cfg.Compression.Enabled,
+			MaxTokens:    cfg.Compression.MaxTokens,
+			LLMModel:     cfg.Compression.LLMModel,
+			LLMThreshold: cfg.Compression.LLMThreshold,
+			RuleMaxItems: cfg.Compression.RuleMaxItems,
+		}
+		chatHandler.SetCompressor(compression.New(compCfg, ollamaClient))
+		if compCfg.Enabled {
+			log.Printf("chat: tool result compression enabled (max_tokens=%d, llm_threshold=%d)", compCfg.MaxTokens, compCfg.LLMThreshold)
 		}
 
 		// Wire SSH messages from cloud → SSH proxy

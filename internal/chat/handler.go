@@ -19,6 +19,7 @@ import (
 
 	"github.com/nlook-service/nlook-router/internal/apiclient"
 	"github.com/nlook-service/nlook-router/internal/cache"
+	"github.com/nlook-service/nlook-router/internal/compression"
 	"github.com/nlook-service/nlook-router/internal/db"
 	"github.com/nlook-service/nlook-router/internal/embedding"
 	"github.com/nlook-service/nlook-router/internal/engine"
@@ -127,6 +128,7 @@ type Handler struct {
 	reasoningMgr    *reasoning.Manager
 	reasoningModel  string // e.g. "claude-sonnet-4-6", from config.yaml reasoning_model
 	orchestrationMgr *orchestration.Manager
+	compressor       compression.Compressor
 }
 
 // SetLLMEngine sets the LLM engine (vLLM or Ollama).
@@ -147,6 +149,11 @@ func (h *Handler) SetReasoningModel(model string) {
 // SetOrchestrationManager sets the multi-model orchestration manager.
 func (h *Handler) SetOrchestrationManager(mgr *orchestration.Manager) {
 	h.orchestrationMgr = mgr
+}
+
+// SetCompressor sets the tool result compressor.
+func (h *Handler) SetCompressor(c compression.Compressor) {
+	h.compressor = c
 }
 
 // SetToolExecutor sets the built-in tool executor (web_search, code_interpreter, etc.)
@@ -538,6 +545,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 
 			toolResult := ExecuteIntent(ctx, intent, h.mcpClient, h.toolExecutor)
 			if toolResult != "" {
+				toolResult = h.compressToolResult(ctx, toolResult, tlog)
 				req.Query = fmt.Sprintf("%s\n\n[Tool Result: %s]\n%s\n[End Tool Result]\n\nAbove is the data. Present it clearly and concisely to the user.", req.Query, intent.Action, toolResult)
 			}
 		}
@@ -680,7 +688,9 @@ func (h *Handler) processChatWithTools(ctx context.Context, req *ChatRequestPayl
 				resultStr = fmt.Sprintf("Error: %v", toolErr)
 			} else {
 				resultBytes, _ := json.Marshal(result)
-				resultStr = string(resultBytes)
+				resultStr = h.compressToolResult(ctx, string(resultBytes), func(format string, args ...interface{}) {
+					log.Printf("[tool_use] "+format, args...)
+				})
 			}
 			toolResults = append(toolResults, map[string]interface{}{
 				"type":        "tool_result",
@@ -1508,6 +1518,19 @@ var localModelPrefixes = []string{
 	"qwen", "llama", "mistral", "codellama", "gemma", "phi",
 	"deepseek", "starcoder", "vicuna", "orca", "wizardcoder",
 	"ollama/", "local/",
+}
+
+// compressToolResult applies compression to a tool result string.
+// Falls back to returning the original text if no compressor is set.
+func (h *Handler) compressToolResult(ctx context.Context, text string, tlog func(string, ...interface{})) string {
+	if h.compressor == nil {
+		return text
+	}
+	result := h.compressor.Compress(ctx, text, 0) // 0 = use config default
+	if result.Method != "none" && result.Method != "disabled" {
+		tlog("compress: %d→%d tokens (%s)", result.Original, result.Compressed, result.Method)
+	}
+	return result.Text
 }
 
 func truncateLog(s string, maxLen int) string {
