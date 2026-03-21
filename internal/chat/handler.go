@@ -27,6 +27,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/ollama"
+	"github.com/nlook-service/nlook-router/internal/orchestration"
 	"github.com/nlook-service/nlook-router/internal/reasoning"
 	"github.com/nlook-service/nlook-router/internal/session"
 	"github.com/nlook-service/nlook-router/internal/tools"
@@ -123,8 +124,9 @@ type Handler struct {
 	sessions      *session.Store
 	tracer        *tracing.Collector
 	storage       db.DB // optional: for persisting chat messages locally
-	reasoningMgr   *reasoning.Manager
-	reasoningModel string // e.g. "claude-sonnet-4-6", from config.yaml reasoning_model
+	reasoningMgr    *reasoning.Manager
+	reasoningModel  string // e.g. "claude-sonnet-4-6", from config.yaml reasoning_model
+	orchestrationMgr *orchestration.Manager
 }
 
 // SetLLMEngine sets the LLM engine (vLLM or Ollama).
@@ -140,6 +142,11 @@ func (h *Handler) SetReasoningManager(mgr *reasoning.Manager) {
 // SetReasoningModel sets the default model for reasoning mode (from config.yaml).
 func (h *Handler) SetReasoningModel(model string) {
 	h.reasoningModel = model
+}
+
+// SetOrchestrationManager sets the multi-model orchestration manager.
+func (h *Handler) SetOrchestrationManager(mgr *orchestration.Manager) {
+	h.orchestrationMgr = mgr
 }
 
 // SetToolExecutor sets the built-in tool executor (web_search, code_interpreter, etc.)
@@ -547,6 +554,17 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		if err != nil {
 			tlog("route: auto-reasoning failed: %v, fallback to complex", err)
 			complexity = "complex" // fallback
+		} else {
+			return resp, nil
+		}
+	}
+
+	// Orchestration: multi-model collaboration for complex/reasoning queries
+	if (complexity == "complex" || complexity == "reasoning") && h.orchestrationMgr != nil && h.orchestrationMgr.IsEnabled() {
+		tlog("route: orchestration (%s)", complexity)
+		resp, err := h.processChatOrchestrated(ctx, req)
+		if err != nil {
+			tlog("route: orchestration failed: %v, fallback to single-model", err)
 		} else {
 			return resp, nil
 		}
@@ -1769,6 +1787,38 @@ func (h *Handler) handleActionSelect(payload json.RawMessage) {
 			Role:           "assistant",
 		})
 	}()
+}
+
+// processChatOrchestrated handles chat via multi-model orchestration.
+func (h *Handler) processChatOrchestrated(ctx context.Context, req *ChatRequestPayload) (*ChatResponsePayload, error) {
+	result, err := h.orchestrationMgr.Execute(ctx, req.Query, req.ConversationID, req.MessageID)
+	if err != nil {
+		return nil, fmt.Errorf("orchestration: %w", err)
+	}
+
+	// Record usage for each subtask
+	if h.usageTracker != nil {
+		for _, u := range result.UsageReport {
+			provider := "ollama"
+			if isClaudeModel(u.Model) {
+				provider = "anthropic"
+			}
+			h.usageTracker.Record(usage.TokenUsage{
+				UserID:   req.UserID,
+				Provider: provider,
+				Model:    u.Model,
+				Category: "orchestration",
+			})
+		}
+	}
+
+	return &ChatResponsePayload{
+		ConversationID: req.ConversationID,
+		MessageID:      req.MessageID,
+		Content:        result.Content,
+		Model:          "orchestrated",
+		ElapsedMs:      result.ElapsedMs,
+	}, nil
 }
 
 // processChatReasoning handles chat with reasoning enabled.
