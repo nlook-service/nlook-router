@@ -136,10 +136,20 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 		// Parse bridge response: check for nested errors
 		resultStr := extractToolResult(result)
 
-		// If search_web failed (API key missing etc), return empty so LLM answers from knowledge
+		// If search_web (Serper) failed, fallback to web_search (DuckDuckGo)
 		if toolName == "search_web" && isToolError(resultStr) {
-			tlog("intent: ⚠ search_web error (likely missing API key), skipping tool result")
-			return ""
+			tlog("intent: ⚠ search_web failed, trying DuckDuckGo fallback (web_search)")
+			result, err = toolExec.Execute(ctx, "web_search", map[string]interface{}{"query": intent.Query})
+			if err != nil {
+				tlog("intent: ✗ DuckDuckGo fallback failed: %v", err)
+				return ""
+			}
+			tlog("intent: ✓ DuckDuckGo fallback result size=%d bytes", len(result))
+			resultStr = extractToolResult(result)
+			if isToolError(resultStr) {
+				tlog("intent: ⚠ DuckDuckGo also failed, skipping")
+				return ""
+			}
 		}
 
 		if len(resultStr) > 3000 {

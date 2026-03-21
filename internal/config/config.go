@@ -30,6 +30,9 @@ type Config struct {
 	CloudModel      string `yaml:"cloud_model,omitempty"`       // e.g. "gemini-2.0-flash-lite"
 	AnthropicAPIKey string `yaml:"anthropic_api_key,omitempty"` // Claude Haiku fallback
 
+	// Web search API key (Serper). Falls back to DuckDuckGo if missing/expired.
+	SerperAPIKey string `yaml:"serper_api_key,omitempty"`
+
 	// Reasoning models: self-evaluation selects the appropriate tier
 	ReasoningModel      string `yaml:"reasoning_model,omitempty"`       // default/medium: e.g. "claude-sonnet-4-6"
 	ReasoningModelLight string `yaml:"reasoning_model_light,omitempty"` // light tasks: e.g. "claude-haiku-4-5-20251001"
@@ -146,6 +149,9 @@ func (c *Config) ApplyLLMEnv() {
 	}
 	if c.AnthropicAPIKey != "" && os.Getenv("ANTHROPIC_API_KEY") == "" {
 		os.Setenv("ANTHROPIC_API_KEY", c.AnthropicAPIKey)
+	}
+	if c.SerperAPIKey != "" && os.Getenv("SERPER_API_KEY") == "" {
+		os.Setenv("SERPER_API_KEY", c.SerperAPIKey)
 	}
 	log.Printf("config: env after apply: VLLM_BASE_URL=%q NLOOK_LLM_ENGINE=%q NLOOK_AI_MODEL=%q GEMINI=%v",
 		os.Getenv("VLLM_BASE_URL"), os.Getenv("NLOOK_LLM_ENGINE"), os.Getenv("NLOOK_AI_MODEL"), os.Getenv("GEMINI_API_KEY") != "")
