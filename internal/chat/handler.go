@@ -575,7 +575,26 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 	}
 
 	// 3. Execute intent-based tool calls (web_search, calculator, MCP tools)
-	if classified.Intent != "general" {
+	// Semantic router intents are for routing only, not tool execution.
+	// Only Haiku intents (web_search, calculator, create_task, etc.) trigger tools.
+	isToolIntent := routingInfo == nil && classified.Intent != "general"
+	if routingInfo != nil {
+		// Map semantic intents to tool intents where applicable
+		switch classified.Intent {
+		case "web_search":
+			isToolIntent = true
+		case "task_query":
+			classified.Intent = "list_tasks"
+			isToolIntent = true
+		case "task_create":
+			classified.Intent = "create_task"
+			isToolIntent = true
+		case "doc_query":
+			classified.Intent = "list_documents"
+			isToolIntent = true
+		}
+	}
+	if isToolIntent {
 		intent := &Intent{Action: classified.Intent, Query: req.Query}
 
 		// Confirm-create intents: send chat:action with workspace options
@@ -646,7 +665,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 			}
 			claudePath := findClaude()
 			if claudePath != "" {
-				resp, err := h.processChatClaudeCLI(ctx, req, claudePath, "reasoning")
+				resp, err := h.processChatClaudeCLIWithModel(ctx, req, claudePath, routingInfo.Model, "reasoning")
 				if err == nil {
 					return attachRouting(resp), nil
 				}
@@ -654,7 +673,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		case tier == 3: // Sonnet
 			claudePath := findClaude()
 			if claudePath != "" {
-				resp, err := h.processChatClaudeCLI(ctx, req, claudePath, "complex")
+				resp, err := h.processChatClaudeCLIWithModel(ctx, req, claudePath, routingInfo.Model, "complex")
 				if err == nil {
 					return attachRouting(resp), nil
 				}
@@ -662,7 +681,7 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		case tier == 2: // Haiku
 			claudePath := findClaude()
 			if claudePath != "" {
-				resp, err := h.processChatClaudeCLI(ctx, req, claudePath, "complex")
+				resp, err := h.processChatClaudeCLIWithModel(ctx, req, claudePath, routingInfo.Model, "complex")
 				if err == nil {
 					return attachRouting(resp), nil
 				}
@@ -1291,7 +1310,20 @@ func findClaude() string {
 }
 
 // processChatClaudeCLI uses Claude Code CLI (for Max subscribers).
+// processChatClaudeCLIWithModel calls Claude CLI with a specific model.
+func (h *Handler) processChatClaudeCLIWithModel(ctx context.Context, req *ChatRequestPayload, claudePath, modelName, cplxHint string) (*ChatResponsePayload, error) {
+	return h.processChatClaudeCLIInternal(ctx, req, claudePath, modelName, cplxHint)
+}
+
 func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayload, claudePath string, complexity ...string) (*ChatResponsePayload, error) {
+	cplx := "complex"
+	if len(complexity) > 0 && complexity[0] != "" {
+		cplx = complexity[0]
+	}
+	return h.processChatClaudeCLIInternal(ctx, req, claudePath, "claude-haiku-4-5-20251001", cplx)
+}
+
+func (h *Handler) processChatClaudeCLIInternal(ctx context.Context, req *ChatRequestPayload, claudePath, modelID, cplxOverride string) (*ChatResponsePayload, error) {
 	systemPrompt := h.getSystemPrompt(req.Lang, req.Query, req.ConversationID)
 
 	// Build prompt with system instructions + history + query
@@ -1312,9 +1344,9 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 		prompt.WriteString("반드시 한국어로 응답하세요.\n\n")
 	}
 	// Adjust response style based on complexity
-	cplx := "complex"
-	if len(complexity) > 0 && complexity[0] != "" {
-		cplx = complexity[0]
+	cplx := cplxOverride
+	if cplx == "" {
+		cplx = "complex"
 	}
 	if cplx == "simple" {
 		prompt.WriteString("응답 규칙:\n")
@@ -1347,7 +1379,7 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 	prompt.WriteString(req.Query)
 
 	cliStart := time.Now()
-	cmd := exec.CommandContext(ctx, claudePath, "-p", prompt.String(), "--model", "claude-haiku-4-5-20251001", "--output-format", "stream-json", "--verbose")
+	cmd := exec.CommandContext(ctx, claudePath, "-p", prompt.String(), "--model", modelID, "--output-format", "stream-json", "--verbose")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1359,7 +1391,7 @@ func (h *Handler) processChatClaudeCLI(ctx context.Context, req *ChatRequestPayl
 
 	var inTok, outTok int
 	var lastText string // track cumulative text to compute deltas
-	model := "claude-haiku-4-5 (CLI)"
+	model := modelID + " (CLI)"
 
 	// Stream tokens as they arrive — each "assistant" event has cumulative text
 	scanner := bufio.NewScanner(stdout)
