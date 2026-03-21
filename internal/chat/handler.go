@@ -27,6 +27,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/ollama"
+	"github.com/nlook-service/nlook-router/internal/reasoning"
 	"github.com/nlook-service/nlook-router/internal/session"
 	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/tracing"
@@ -59,25 +60,28 @@ type ChatRequestPayload struct {
 
 // ChatResponsePayload is sent back to cloud with the AI response.
 type ChatResponsePayload struct {
-	ConversationID int64   `json:"conversation_id"`
-	MessageID      int64   `json:"message_id"`
-	Content        string  `json:"content"`
-	Model          string  `json:"model"`
-	Role           string  `json:"role"`
-	ElapsedMs      int64   `json:"elapsed_ms,omitempty"`
-	TokensUsed     int     `json:"tokens_used,omitempty"`
+	ConversationID int64                  `json:"conversation_id"`
+	MessageID      int64                  `json:"message_id"`
+	Content        string                 `json:"content"`
+	Model          string                 `json:"model"`
+	Role           string                 `json:"role"`
+	ElapsedMs      int64                  `json:"elapsed_ms,omitempty"`
+	TokensUsed     int                    `json:"tokens_used,omitempty"`
+	Reasoning      *reasoning.ReasoningData `json:"reasoning,omitempty"`
 }
 
 // ChatDeltaPayload is sent for streaming token-by-token responses.
 type ChatDeltaPayload struct {
-	ConversationID int64   `json:"conversation_id"`
-	MessageID      int64   `json:"message_id"`
-	Delta          string  `json:"delta"`
-	Done           bool    `json:"done"`
-	FullContent    string  `json:"full_content,omitempty"`
-	Model          string  `json:"model,omitempty"`
-	ElapsedMs      int64   `json:"elapsed_ms,omitempty"`
-	TokensUsed     int     `json:"tokens_used,omitempty"`
+	ConversationID int64           `json:"conversation_id"`
+	MessageID      int64           `json:"message_id"`
+	Delta          string          `json:"delta"`
+	DeltaType      string          `json:"delta_type,omitempty"` // "content" (default), "thinking", "step"
+	Done           bool            `json:"done"`
+	FullContent    string          `json:"full_content,omitempty"`
+	Model          string          `json:"model,omitempty"`
+	ElapsedMs      int64           `json:"elapsed_ms,omitempty"`
+	TokensUsed     int             `json:"tokens_used,omitempty"`
+	ReasoningStep  *reasoning.Step `json:"reasoning_step,omitempty"`
 }
 
 // ChatErrorPayload is sent when chat processing fails.
@@ -119,11 +123,17 @@ type Handler struct {
 	sessions      *session.Store
 	tracer        *tracing.Collector
 	storage       db.DB // optional: for persisting chat messages locally
+	reasoningMgr  *reasoning.Manager
 }
 
 // SetLLMEngine sets the LLM engine (vLLM or Ollama).
 func (h *Handler) SetLLMEngine(e *llm.Engine) {
 	h.llmEngine = e
+}
+
+// SetReasoningManager sets the reasoning manager for thinking-mode chat.
+func (h *Handler) SetReasoningManager(mgr *reasoning.Manager) {
+	h.reasoningMgr = mgr
 }
 
 // SetToolExecutor sets the built-in tool executor (web_search, code_interpreter, etc.)
@@ -439,6 +449,24 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 	traceID, _ := ctx.Value("trace_id").(string)
 	tlog := func(format string, args ...interface{}) {
 		log.Printf("[%s] "+format, append([]interface{}{traceID}, args...)...)
+	}
+
+	// Reasoning mode: detect ":thinking" suffix in model name
+	reasoningEnabled := strings.HasSuffix(model, ":thinking")
+	if reasoningEnabled {
+		model = strings.TrimSuffix(model, ":thinking")
+		req.Model = model
+	}
+
+	// If reasoning mode, route through reasoning manager
+	if reasoningEnabled && h.reasoningMgr != nil {
+		tlog("route: reasoning mode (model=%s)", model)
+		resp, err := h.processChatReasoning(ctx, req, model)
+		if err != nil {
+			tlog("reasoning failed, fallback to normal: %v", err)
+		} else {
+			return resp, nil
+		}
 	}
 
 	// Intent detection: directly call MCP tools without relying on model
@@ -1733,4 +1761,110 @@ func (h *Handler) handleActionSelect(payload json.RawMessage) {
 			Role:           "assistant",
 		})
 	}()
+}
+
+// processChatReasoning handles chat with reasoning enabled.
+// Streams thinking deltas, step completions, and final answer with structured ReasoningData.
+func (h *Handler) processChatReasoning(ctx context.Context, req *ChatRequestPayload, model string) (*ChatResponsePayload, error) {
+	start := time.Now()
+
+	// Build system prompt
+	systemPrompt := h.buildSystemPromptForChat(ctx, req)
+
+	cfg := reasoning.DefaultConfig()
+	cfg.Model = model
+
+	events, err := h.reasoningMgr.Stream(ctx, model, systemPrompt, req.Query, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("reasoning stream: %w", err)
+	}
+
+	var fullContent string
+
+	for event := range events {
+		switch event.Type {
+		case reasoning.EventThinkingDelta:
+			h.sendResponse("chat:delta", ChatDeltaPayload{
+				ConversationID: req.ConversationID,
+				MessageID:      req.MessageID,
+				DeltaType:      "thinking",
+				Delta:          event.Content,
+				Model:          model,
+			})
+
+		case reasoning.EventContentDelta:
+			fullContent += event.Content
+			h.sendResponse("chat:delta", ChatDeltaPayload{
+				ConversationID: req.ConversationID,
+				MessageID:      req.MessageID,
+				DeltaType:      "content",
+				Delta:          event.Content,
+				FullContent:    fullContent,
+				Model:          model,
+			})
+
+		case reasoning.EventStepComplete:
+			h.sendResponse("chat:delta", ChatDeltaPayload{
+				ConversationID: req.ConversationID,
+				MessageID:      req.MessageID,
+				DeltaType:      "step",
+				ReasoningStep:  event.Step,
+				Model:          model,
+			})
+
+		case reasoning.EventCompleted:
+			if event.Result != nil {
+				fullContent = event.Result.Answer
+				provider := string(reasoning.DetectProvider(model))
+				reasoningData := event.Result.ToReasoningData(provider, model)
+
+				// Send final done delta
+				h.sendResponse("chat:delta", ChatDeltaPayload{
+					ConversationID: req.ConversationID,
+					MessageID:      req.MessageID,
+					Done:           true,
+					FullContent:    fullContent,
+					Model:          model,
+					ElapsedMs:      time.Since(start).Milliseconds(),
+					TokensUsed:     event.Result.TokensUsed,
+				})
+
+				return &ChatResponsePayload{
+					ConversationID: req.ConversationID,
+					MessageID:      req.MessageID,
+					Content:        fullContent,
+					Model:          model,
+					Role:           "assistant",
+					ElapsedMs:      time.Since(start).Milliseconds(),
+					TokensUsed:     event.Result.TokensUsed,
+					Reasoning:      reasoningData,
+				}, nil
+			}
+
+		case reasoning.EventError:
+			return nil, event.Error
+		}
+	}
+
+	// Should not reach here normally, but handle gracefully
+	return &ChatResponsePayload{
+		ConversationID: req.ConversationID,
+		MessageID:      req.MessageID,
+		Content:        fullContent,
+		Model:          model,
+		Role:           "assistant",
+		ElapsedMs:      time.Since(start).Milliseconds(),
+	}, nil
+}
+
+// buildSystemPromptForChat builds the system prompt using existing PromptBuilder.
+func (h *Handler) buildSystemPromptForChat(_ context.Context, req *ChatRequestPayload) string {
+	if h.promptBuilder != nil {
+		lang := req.Lang
+		if lang == "" {
+			lang = detectLang(req.Query)
+		}
+		return h.promptBuilder.BuildSystemPrompt(lang, req.Query, req.ConversationID)
+	}
+	return ""
 }

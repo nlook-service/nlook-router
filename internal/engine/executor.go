@@ -6,15 +6,17 @@ import (
 	"time"
 
 	"github.com/nlook-service/nlook-router/internal/apiclient"
+	"github.com/nlook-service/nlook-router/internal/reasoning"
 	"github.com/nlook-service/nlook-router/internal/tracing"
 )
 
 // StepResult holds the outcome of a single step execution.
 type StepResult struct {
-	Output   map[string]interface{}
-	Status   string // "completed", "failed", "skipped"
-	Error    string
-	LogLines []string
+	Output    map[string]interface{}
+	Status    string // "completed", "failed", "skipped"
+	Error     string
+	LogLines  []string
+	Reasoning *reasoning.ReasoningData // structured reasoning data, if reasoning was used
 }
 
 // StepEvent contains all metadata about a completed step, passed to StepHook callbacks.
@@ -124,14 +126,19 @@ func (e *StepExecutor) Execute(ctx context.Context, rctx *RunContext, workflowID
 			eventType = tracing.EventNodeError
 			level = tracing.LevelError
 		}
+		meta := map[string]interface{}{
+			"status": result.Status,
+			"error":  result.Error,
+		}
+		// Include structured reasoning data in trace if present
+		if result.Reasoning != nil && result.Reasoning.Enabled {
+			meta["reasoning"] = result.Reasoning
+		}
 		rctx.Tracer.Emit(tracing.NewEvent(rctx.SessionID, eventType, node.NodeID).
 			WithSpan(spanID, "").
 			WithDuration(time.Since(started).Milliseconds()).
 			WithLevel(level).
-			WithMeta(map[string]interface{}{
-				"status": result.Status,
-				"error":  result.Error,
-			}))
+			WithMeta(meta))
 	}
 
 	// Report step completion to cloud
@@ -268,10 +275,19 @@ func (e *StepExecutor) executeSkillNode(ctx context.Context, node *apiclient.Wor
 		}
 	}
 
+	// Extract structured reasoning data from output if present
+	var reasoningData *reasoning.ReasoningData
+	if rd, ok := output["reasoning"]; ok {
+		if data, ok := rd.(*reasoning.ReasoningData); ok {
+			reasoningData = data
+		}
+	}
+
 	return &StepResult{
-		Output:   output,
-		Status:   "completed",
-		LogLines: logs,
+		Output:    output,
+		Status:    "completed",
+		LogLines:  logs,
+		Reasoning: reasoningData,
 	}
 }
 

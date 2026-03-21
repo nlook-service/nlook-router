@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nlook-service/nlook-router/internal/apiclient"
+	"github.com/nlook-service/nlook-router/internal/reasoning"
 )
 
 // ToolExecutor runs a tool by name (e.g. Python bridge). If nil, runTool returns a placeholder.
@@ -30,6 +31,7 @@ type SkillRunner struct {
 	httpClient   *http.Client
 	toolExecutor ToolExecutor
 	mcpClient    MCPExecutor
+	reasoningMgr *reasoning.Manager
 }
 
 // NewSkillRunner creates a new SkillRunner.
@@ -47,6 +49,11 @@ func (r *SkillRunner) SetToolExecutor(e ToolExecutor) {
 // SetMCPClient sets the MCP client for mcp-type skill execution.
 func (r *SkillRunner) SetMCPClient(c MCPExecutor) {
 	r.mcpClient = c
+}
+
+// SetReasoningManager sets the reasoning manager for reasoning-enabled skills.
+func (r *SkillRunner) SetReasoningManager(mgr *reasoning.Manager) {
+	r.reasoningMgr = mgr
 }
 
 // RunSkill dispatches execution to the appropriate handler based on skill type.
@@ -138,7 +145,39 @@ func (r *SkillRunner) runPrompt(ctx context.Context, skill *apiclient.WorkflowSk
 
 	logs = append(logs, fmt.Sprintf("model=%s temperature=%.1f max_tokens=%d", model, temperature, maxTokens))
 
-	// Route to appropriate backend based on model name
+	// Check reasoning mode from skill/agent config
+	reasoningEnabled := getConfigBool(skill.Config, "reasoning_enabled")
+	if agent != nil {
+		if v := getConfigBool(agent.Config, "reasoning_enabled"); v {
+			reasoningEnabled = true
+		}
+	}
+
+	if reasoningEnabled && r.reasoningMgr != nil {
+		cfg := reasoning.DefaultConfig()
+		cfg.Model = model
+		cfg.Temperature = temperature
+		cfg.MaxTokens = maxTokens
+		if ms := getConfigInt(skill.Config, "reasoning_max_steps"); ms > 0 {
+			cfg.MaxSteps = ms
+		}
+
+		logs = append(logs, "reasoning: enabled")
+		answer, reasoningData, err := r.reasoningMgr.ReasonWithData(ctx, model, systemPrompt, prompt, cfg)
+		if err != nil {
+			logs = append(logs, fmt.Sprintf("reasoning failed, fallback to 1-shot: %v", err))
+		} else {
+			logs = append(logs, fmt.Sprintf("reasoning: %d steps, provider=%s", reasoningData.StepCount, reasoningData.Provider))
+			result := map[string]interface{}{
+				"text":      answer,
+				"model":     model,
+				"reasoning": reasoningData,
+			}
+			return result, logs, nil
+		}
+	}
+
+	// Route to appropriate backend based on model name (1-shot)
 	if strings.HasPrefix(model, "claude") || strings.HasPrefix(model, "anthropic") {
 		return r.callClaudeCLI(ctx, model, systemPrompt, prompt, maxTokens, logs)
 	}
@@ -146,6 +185,37 @@ func (r *SkillRunner) runPrompt(ctx context.Context, skill *apiclient.WorkflowSk
 		return r.callOllama(ctx, model, systemPrompt, prompt, temperature, maxTokens, logs)
 	}
 	return r.callOpenAI(ctx, model, systemPrompt, prompt, temperature, maxTokens, logs)
+}
+
+func getConfigBool(cfg map[string]interface{}, key string) bool {
+	if cfg == nil {
+		return false
+	}
+	v, ok := cfg[key]
+	if !ok {
+		return false
+	}
+	b, _ := v.(bool)
+	return b
+}
+
+func getConfigInt(cfg map[string]interface{}, key string) int {
+	if cfg == nil {
+		return 0
+	}
+	v, ok := cfg[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	}
+	return 0
 }
 
 // callClaudeCLI uses the Claude Code CLI to call Claude models (no API key needed).
@@ -658,4 +728,25 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// CallLLM provides a public LLM call function for use by the reasoning package.
+// Routes to the appropriate backend (Ollama/Claude/OpenAI) based on model name.
+func (r *SkillRunner) CallLLM(ctx context.Context, model, system, prompt string, temp float64, maxTokens int) (string, int, error) {
+	var result map[string]interface{}
+	var err error
+
+	if strings.HasPrefix(model, "claude") || strings.HasPrefix(model, "anthropic") {
+		result, _, err = r.callClaudeCLI(ctx, model, system, prompt, maxTokens, nil)
+	} else if isLocalModel(model) {
+		result, _, err = r.callOllama(ctx, model, system, prompt, temp, maxTokens, nil)
+	} else {
+		result, _, err = r.callOpenAI(ctx, model, system, prompt, temp, maxTokens, nil)
+	}
+	if err != nil {
+		return "", 0, err
+	}
+
+	text, _ := result["text"].(string)
+	return text, 0, nil
 }

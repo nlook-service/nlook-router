@@ -63,6 +63,14 @@ graph TB
             EV[Eval Framework]
         end
 
+        subgraph Reasoning["Reasoning Layer"]
+            RM[Reasoning Manager]
+            GR[Gemma Reasoner]
+            CR[Claude Reasoner]
+            DR[DeepSeek Reasoner]
+            DC[Default CoT]
+        end
+
         subgraph LLM["LLM Layer"]
             LE[LLM Engine]
             OL[Ollama]
@@ -88,7 +96,7 @@ graph TB
 
     WS --> CH & EX & AH & SH & SY
 
-    CH --> LE
+    CH --> RM
     CH --> SS & CS & VS & MS
     EX --> WE
     WE --> SE --> SR
@@ -97,7 +105,9 @@ graph TB
     EV -.->|StepEvalHook.OnStepComplete| SE
     WE -.->|OnRunFinished| EV
 
-    SR --> LE
+    SR --> RM
+    RM --> GR & CR & DR & DC
+    RM --> LE
     LE --> OL & VL & GM
 
     SE --> TR
@@ -186,14 +196,16 @@ flowchart TB
     end
 
     subgraph SkillTypes["Skill Types"]
-        PR[prompt → LLM call]
+        PR{reasoning\nenabled?}
+        PR1[prompt → Reasoning Manager → structured result]
+        PR2[prompt → LLM 1-shot call]
         AP[api → HTTP request]
         TL[tool → Python bridge]
         MC[mcp → nlook API]
     end
 
     subgraph Output["Output"]
-        CL[/"Report to Cloud (step:complete)"/]
+        CL[/"Report to Cloud (step:complete)\n+ ReasoningData"/]
         RC[RunContext.nodeOutputs]
         EH[/"Eval Hook (optional)"/]
         RS[/"run:status (final)"/]
@@ -206,6 +218,8 @@ flowchart TB
 
     EN --> SK & AG & CD & LP & PL
     SK & AG --> PR & AP & TL & MC
+    PR -->|yes| PR1
+    PR -->|no| PR2
 
     SE --> CL
     HK -.-> EH
@@ -226,6 +240,8 @@ flowchart LR
         INT[Intent Detection]
         DOC[Document Ref Extraction]
         PB[Prompt Builder]
+        RZ{Reasoning\nEnabled?}
+        RSN[Reasoning Manager]
         LLM[LLM Call]
         POST[Post-Response]
     end
@@ -240,17 +256,20 @@ flowchart LR
     end
 
     subgraph Response
-        DELTA[/"chat:delta (token stream)"/]
-        RESP[/"chat:response (final)"/]
+        DELTA[/"chat:delta (token stream)\n+ delta_type: thinking|step|content"/]
+        RESP[/"chat:response (final)\n+ reasoning: ReasoningData"/]
         SAVE[DB: save conversation]
         MEM[Memory: extract facts]
-        TRACE[Trace: log events]
+        TRACE[Trace: log events + reasoning steps]
     end
 
     REQ --> INT --> DOC --> PB
     PB --> P1 & P2 & P3 & P4 & P5 & P6
-    PB --> LLM --> DELTA --> RESP
-    LLM --> POST --> SAVE & MEM & TRACE
+    PB --> RZ
+    RZ -->|":thinking" model| RSN --> DELTA
+    RZ -->|normal| LLM --> DELTA
+    DELTA --> RESP
+    RSN & LLM --> POST --> SAVE & MEM & TRACE
 ```
 
 ---
@@ -367,6 +386,7 @@ internal/
 ├── mcp/            # MCP tool client (nlook API tools)
 ├── memory/         # Long-term user memory (fact extraction)
 ├── ollama/         # Ollama client
+├── reasoning/      # Reasoning engine (CoT + native thinking)
 ├── scheduler/      # Cron-based workflow scheduling
 ├── server/         # Local HTTP server (:3333)
 ├── session/        # Session store with TTL
@@ -450,6 +470,68 @@ flowchart LR
     D --> D3[Agent Proxy]
     D --> D4[SSH Proxy]
 ```
+
+---
+
+## Reasoning Architecture
+
+The reasoning layer enables LLMs to **think step-by-step before answering**, improving accuracy on complex tasks. All reasoning data is returned as structured JSON in every response.
+
+### How It Works
+
+```
+                          ┌─ Gemma <think> tag extraction (primary)
+Request ─→ Reasoning ─────┼─ Claude extended thinking
+           Manager        ├─ DeepSeek R1 <think> tag
+                          └─ Default CoT loop (any model)
+```
+
+### Activation
+
+| Context | How to enable |
+|---------|--------------|
+| Chat | Use model name with `:thinking` suffix: `gemma3:12b:thinking` |
+| Workflow Skill | Set `reasoning_enabled: true` in skill config |
+| Workflow Agent | Set `reasoning_enabled: true` in agent config |
+
+### Structured Response Data
+
+When reasoning is enabled, all responses include a `reasoning` field:
+
+```json
+{
+  "content": "final answer text",
+  "reasoning": {
+    "enabled": true,
+    "provider": "gemma",
+    "model": "gemma3:12b",
+    "steps": [
+      {"title": "Step 1", "reasoning": "...", "confidence": 0.9, "next_action": "continue"},
+      {"title": "Step 2", "reasoning": "...", "confidence": 0.85, "next_action": "final_answer"}
+    ],
+    "thinking_text": "raw <think> content",
+    "total_ms": 2340,
+    "tokens_used": 512,
+    "step_count": 2,
+    "avg_confidence": 0.875
+  }
+}
+```
+
+### Streaming Delta Types
+
+During chat streaming, `delta_type` indicates the content category:
+
+| delta_type | Description |
+|-----------|-------------|
+| `thinking` | Model's internal reasoning process |
+| `step` | Completed reasoning step (includes structured `reasoning_step`) |
+| `content` | Final answer text (default, backward-compatible) |
+
+### Design Docs
+
+- Plan: `docs/01-plan/features/router-reasoning-architecture.plan.md`
+- Design: `docs/02-design/features/router-reasoning-architecture.design.md`
 
 ---
 

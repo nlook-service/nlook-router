@@ -25,6 +25,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/mcp"
 	"github.com/nlook-service/nlook-router/internal/memory"
 	"github.com/nlook-service/nlook-router/internal/ollama"
+	"github.com/nlook-service/nlook-router/internal/reasoning"
 	"github.com/nlook-service/nlook-router/internal/server"
 	"github.com/nlook-service/nlook-router/internal/agentproxy"
 	"github.com/nlook-service/nlook-router/internal/db"
@@ -126,6 +127,13 @@ func RunDaemon(cfg *config.Config) error {
 	if cfg.APIKey != "" {
 		skillRunner.SetMCPClient(mcp.NewClient(cfg.APIKey))
 	}
+
+	// Reasoning engine: enables step-by-step reasoning for LLM calls
+	reasoningCaller := reasoning.NewFuncCaller(skillRunner.CallLLM, nil)
+	reasoningMgr := reasoning.NewManager(reasoningCaller)
+	skillRunner.SetReasoningManager(reasoningMgr)
+	log.Println("reasoning: manager initialized")
+
 	stepExec := engine.NewStepExecutor(client, skillRunner)
 	eng := engine.NewWorkflowEngine(stepExec)
 	execService := executor.NewExecutionService(client, eng, 5*time.Second)
@@ -291,6 +299,7 @@ func RunDaemon(cfg *config.Config) error {
 		chatHandler.SetLLMEngine(llmEngine)
 		chatHandler.SetSessionStore(sessionStore)
 		chatHandler.SetTracer(traceCollector)
+		chatHandler.SetReasoningManager(reasoningMgr)
 		if toolsBridge != nil {
 			chatHandler.SetToolExecutor(toolsBridge)
 			log.Printf("chat: built-in tools connected (web_search, code_interpreter, etc.)")
