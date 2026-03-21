@@ -355,10 +355,10 @@ func RunDaemon(cfg *config.Config) error {
 						models.Tier2 = "claude-haiku-4-5-20251001"
 					}
 					if models.Tier3 == "" {
-						models.Tier3 = "claude-sonnet-4-6-20260320"
+						models.Tier3 = "claude-sonnet-4-6"
 					}
 					if models.Tier4 == "" {
-						models.Tier4 = "claude-opus-4-6-20260318"
+						models.Tier4 = "claude-opus-4-6"
 					}
 
 					// Haiku fallback: when semantic score is too low, use Haiku for classification
