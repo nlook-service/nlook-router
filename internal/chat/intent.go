@@ -109,8 +109,13 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 			tlog("intent: ⚠ no tool executor for %s", intent.Action)
 			return ""
 		}
-		tlog("intent: 🔧 calling built-in tool: %s", intent.Action)
-		result, err := toolExec.Execute(ctx, intent.Action, map[string]interface{}{"query": intent.Query})
+		// Map intent action to actual tool name
+		toolName := intent.Action
+		if toolName == "web_search" {
+			toolName = "search_web"
+		}
+		tlog("intent: 🔧 calling built-in tool: %s (tool=%s)", intent.Action, toolName)
+		result, err := toolExec.Execute(ctx, toolName, map[string]interface{}{"query": intent.Query})
 		if err != nil {
 			tlog("intent: ✗ tool exec failed: %v", err)
 			return fmt.Sprintf("[도구 오류: %v]", err)
