@@ -138,7 +138,7 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 
 		// If search_web (Serper) failed, fallback to web_search (DuckDuckGo)
 		if toolName == "search_web" && isToolError(resultStr) {
-			tlog("intent: ⚠ search_web failed, trying DuckDuckGo fallback (web_search)")
+			tlog("intent: ⚠ search_web failed (result=%s), trying DuckDuckGo fallback", truncateStr(resultStr, 200))
 			result, err = toolExec.Execute(ctx, "web_search", map[string]interface{}{"query": intent.Query})
 			if err != nil {
 				tlog("intent: ✗ DuckDuckGo fallback failed: %v", err)
@@ -146,6 +146,7 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 			}
 			tlog("intent: ✓ DuckDuckGo fallback result size=%d bytes", len(result))
 			resultStr = extractToolResult(result)
+			tlog("intent: DuckDuckGo extracted=%s", truncateStr(resultStr, 200))
 			if isToolError(resultStr) {
 				tlog("intent: ⚠ DuckDuckGo also failed, skipping")
 				return ""
@@ -471,7 +472,13 @@ func extractToolResult(raw []byte) string {
 	return resultStr
 }
 
-// isToolError checks if a tool result contains an error message.
+// isToolError checks if a tool result is a JSON error object (not search results).
 func isToolError(result string) bool {
-	return strings.Contains(result, `"error"`) && (strings.Contains(result, "API key") || strings.Contains(result, "error"))
+	// Parse as JSON object — only {"error": "..."} format is a real error
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(result)), &obj); err != nil {
+		return false // not JSON object → not an error
+	}
+	_, hasError := obj["error"]
+	return hasError && len(obj) <= 2 // error-only objects, not search results
 }
