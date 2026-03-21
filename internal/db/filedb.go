@@ -652,6 +652,19 @@ func (f *FileDB) ListEvalResults(_ context.Context, _ string) ([]*eval.EvalResul
 
 // --- Lifecycle ---
 
+// --- Routing Feedback (no-op for FileDB, requires SQLite) ---
+
+func (f *FileDB) InsertRoutingFeedback(ctx context.Context, fb *RoutingFeedback) error { return nil }
+func (f *FileDB) UpdateRoutingFeedbackLiked(ctx context.Context, messageID int64, liked bool) error {
+	return nil
+}
+func (f *FileDB) GetRoutingFeedbackStats(ctx context.Context) ([]*RoutingFeedbackStats, error) {
+	return nil, nil
+}
+func (f *FileDB) GetLikedFeedback(ctx context.Context, since int64) ([]*RoutingFeedback, error) {
+	return nil, nil
+}
+
 func (f *FileDB) Migrate(ctx context.Context) error {
 	return nil // FileDB has no schema to migrate
 }

@@ -30,6 +30,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/ollama"
 	"github.com/nlook-service/nlook-router/internal/orchestration"
 	"github.com/nlook-service/nlook-router/internal/reasoning"
+	"github.com/nlook-service/nlook-router/internal/semantic"
 	"github.com/nlook-service/nlook-router/internal/session"
 	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/tracing"
@@ -62,14 +63,15 @@ type ChatRequestPayload struct {
 
 // ChatResponsePayload is sent back to cloud with the AI response.
 type ChatResponsePayload struct {
-	ConversationID int64                  `json:"conversation_id"`
-	MessageID      int64                  `json:"message_id"`
-	Content        string                 `json:"content"`
-	Model          string                 `json:"model"`
-	Role           string                 `json:"role"`
-	ElapsedMs      int64                  `json:"elapsed_ms,omitempty"`
-	TokensUsed     int                    `json:"tokens_used,omitempty"`
+	ConversationID int64                    `json:"conversation_id"`
+	MessageID      int64                    `json:"message_id"`
+	Content        string                   `json:"content"`
+	Model          string                   `json:"model"`
+	Role           string                   `json:"role"`
+	ElapsedMs      int64                    `json:"elapsed_ms,omitempty"`
+	TokensUsed     int                      `json:"tokens_used,omitempty"`
 	Reasoning      *reasoning.ReasoningData `json:"reasoning,omitempty"`
+	Routing        *semantic.RoutingInfo    `json:"routing,omitempty"`
 }
 
 // ChatDeltaPayload is sent for streaming token-by-token responses.
@@ -129,6 +131,8 @@ type Handler struct {
 	reasoningModel  string // e.g. "claude-sonnet-4-6", from config.yaml reasoning_model
 	orchestrationMgr *orchestration.Manager
 	compressor       compression.Compressor
+	semanticRouter   *semantic.Router
+	feedbackMgr      *semantic.FeedbackManager
 }
 
 // SetLLMEngine sets the LLM engine (vLLM or Ollama).
@@ -154,6 +158,16 @@ func (h *Handler) SetOrchestrationManager(mgr *orchestration.Manager) {
 // SetCompressor sets the tool result compressor.
 func (h *Handler) SetCompressor(c compression.Compressor) {
 	h.compressor = c
+}
+
+// SetSemanticRouter sets the semantic router for score-based classification.
+func (h *Handler) SetSemanticRouter(r *semantic.Router) {
+	h.semanticRouter = r
+}
+
+// SetFeedbackManager sets the routing feedback manager.
+func (h *Handler) SetFeedbackManager(f *semantic.FeedbackManager) {
+	h.feedbackMgr = f
 }
 
 // SetToolExecutor sets the built-in tool executor (web_search, code_interpreter, etc.)
@@ -230,8 +244,30 @@ func (h *Handler) HandleMessage(msgType string, payload json.RawMessage) bool {
 	case "chat:action:select":
 		h.handleActionSelect(payload)
 		return true
+	case "chat:feedback":
+		h.handleChatFeedback(payload)
+		return true
 	default:
 		return false
+	}
+}
+
+// handleChatFeedback processes user like/dislike feedback for routing learning.
+func (h *Handler) handleChatFeedback(payload json.RawMessage) {
+	var fb struct {
+		MessageID int64 `json:"message_id"`
+		Liked     bool  `json:"liked"`
+	}
+	if err := json.Unmarshal(payload, &fb); err != nil {
+		log.Printf("chat:feedback unmarshal error: %v", err)
+		return
+	}
+	if h.feedbackMgr != nil {
+		if err := h.feedbackMgr.UpdateLiked(context.Background(), fb.MessageID, fb.Liked); err != nil {
+			log.Printf("chat:feedback update error: %v", err)
+		} else {
+			log.Printf("chat:feedback msg=%d liked=%v", fb.MessageID, fb.Liked)
+		}
 	}
 }
 
@@ -504,8 +540,39 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		}
 	}
 
-	// 2. Unified classification: Haiku determines both intent and complexity in one call
-	classified := h.classifyWithHaiku(ctx, req.Query, tlog)
+	// 2. Unified classification: Semantic Router (score-based) or Haiku fallback
+	var classified classifyResult
+	var routingInfo *semantic.RoutingInfo
+	if h.semanticRouter != nil {
+		sr := h.semanticRouter.Classify(ctx, req.Query)
+		classified = classifyResult{
+			Intent:     sr.Intent,
+			Complexity: sr.Complexity,
+		}
+		routingInfo = &semantic.RoutingInfo{
+			Intent:          sr.Intent,
+			SimilarityScore: sr.SimilarityScore,
+			ModelTier:       sr.ModelTier,
+			Model:           sr.Model,
+		}
+		tlog("classify: semantic score=%.3f intent=%s tier=%d model=%s",
+			sr.SimilarityScore, sr.Intent, sr.ModelTier, sr.Model)
+
+		// Record routing decision for feedback learning
+		if h.feedbackMgr != nil {
+			h.feedbackMgr.Record(ctx, semantic.FeedbackRecord{
+				ConversationID:  req.ConversationID,
+				MessageID:       req.MessageID,
+				QueryText:       req.Query,
+				MatchedIntent:   sr.Intent,
+				SimilarityScore: sr.SimilarityScore,
+				ModelTier:       sr.ModelTier,
+				ModelUsed:       sr.Model,
+			})
+		}
+	} else {
+		classified = h.classifyWithHaiku(ctx, req.Query, tlog)
+	}
 
 	// 3. Execute intent-based tool calls (web_search, calculator, MCP tools)
 	if classified.Intent != "general" {
@@ -551,23 +618,94 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		}
 	}
 
-	// 4. Route based on complexity
+	// 4. Route based on tier (semantic router) or complexity (legacy)
 	localModel := h.findLocalModel(ctx, model)
 	complexity := classified.Complexity
 
-	// Auto reasoning: if classified as "reasoning" and reasoning manager + model configured
+	// Helper to attach routing info to response
+	attachRouting := func(resp *ChatResponsePayload) *ChatResponsePayload {
+		if resp != nil && routingInfo != nil {
+			resp.Routing = routingInfo
+		}
+		return resp
+	}
+
+	// Semantic router: tier-based model selection
+	if routingInfo != nil {
+		tier := routingInfo.ModelTier
+		tlog("route: semantic tier=%d model=%s", tier, routingInfo.Model)
+
+		switch {
+		case tier >= 4: // Opus / Reasoning
+			if h.reasoningMgr != nil && h.reasoningModel != "" {
+				resp, err := h.processChatReasoning(ctx, req, h.reasoningModel)
+				if err == nil {
+					return attachRouting(resp), nil
+				}
+				tlog("route: tier4 reasoning failed: %v, fallback to Claude CLI", err)
+			}
+			claudePath := findClaude()
+			if claudePath != "" {
+				resp, err := h.processChatClaudeCLI(ctx, req, claudePath, "reasoning")
+				if err == nil {
+					return attachRouting(resp), nil
+				}
+			}
+		case tier == 3: // Sonnet
+			claudePath := findClaude()
+			if claudePath != "" {
+				resp, err := h.processChatClaudeCLI(ctx, req, claudePath, "complex")
+				if err == nil {
+					return attachRouting(resp), nil
+				}
+			}
+		case tier == 2: // Haiku
+			claudePath := findClaude()
+			if claudePath != "" {
+				resp, err := h.processChatClaudeCLI(ctx, req, claudePath, "complex")
+				if err == nil {
+					return attachRouting(resp), nil
+				}
+			}
+		default: // tier 1: local model
+			if localModel != "" && h.mcpClient != nil {
+				resp, err := h.processChatOllama(ctx, req, localModel)
+				if err == nil {
+					return attachRouting(resp), nil
+				}
+				tlog("route: tier1 local failed: %v", err)
+			}
+			if localModel != "" {
+				resp, err := h.processChatOllamaSimple(ctx, req, localModel)
+				if err == nil {
+					return attachRouting(resp), nil
+				}
+			}
+		}
+
+		// Fallback: try Gemini if all tier routes failed
+		geminiClient := gemini.NewClient()
+		if geminiClient != nil {
+			resp, err := h.processChatGemini(ctx, req, geminiClient)
+			if err == nil {
+				return attachRouting(resp), nil
+			}
+		}
+		return nil, fmt.Errorf("no LLM available for tier %d", tier)
+	}
+
+	// Legacy: complexity-based routing (when semantic router is not enabled)
 	if complexity == "reasoning" && h.reasoningMgr != nil && h.reasoningModel != "" {
 		tlog("route: auto-reasoning (model=%s)", h.reasoningModel)
 		resp, err := h.processChatReasoning(ctx, req, h.reasoningModel)
 		if err != nil {
 			tlog("route: auto-reasoning failed: %v, fallback to complex", err)
-			complexity = "complex" // fallback
+			complexity = "complex"
 		} else {
 			return resp, nil
 		}
 	}
 
-	// Orchestration: multi-model collaboration for complex/reasoning queries
 	if (complexity == "complex" || complexity == "reasoning") && h.orchestrationMgr != nil && h.orchestrationMgr.IsEnabled() {
 		tlog("route: orchestration (%s)", complexity)
 		resp, err := h.processChatOrchestrated(ctx, req)
@@ -578,8 +716,6 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		}
 	}
 
-	// Step 1: Always try local model with tool calling first (MCP function calling)
-	// gemma3 can call MCP tools (create_document, send_notification, etc.)
 	if localModel != "" && h.mcpClient != nil {
 		tlog("route: local %s tool-calling (%s)", localModel, complexity)
 		resp, err := h.processChatOllama(ctx, req, localModel)
@@ -589,8 +725,6 @@ func (h *Handler) processChat(ctx context.Context, req *ChatRequestPayload) (*Ch
 		tlog("route: local %s failed: %v", localModel, err)
 	}
 
-	// Step 2: simple without tools → local model (already tried with tools above)
-	// complex → Claude for high reasoning (no MCP tools but better analysis)
 	if complexity != "simple" {
 		claudePath := findClaude()
 		if claudePath != "" {
@@ -1360,6 +1494,15 @@ func (h *Handler) processChatOllamaSimple(ctx context.Context, req *ChatRequestP
 type classifyResult struct {
 	Intent     string `json:"intent"`     // web_search, calculator, create_task, create_document, list_tasks, list_documents, general
 	Complexity string `json:"complexity"` // simple, complex, reasoning
+}
+
+// ClassifyWithHaiku is a public wrapper for classifyWithHaiku (used by semantic router fallback).
+// Returns (intent, complexity) strings.
+func (h *Handler) ClassifyWithHaiku(ctx context.Context, query string) (string, string) {
+	r := h.classifyWithHaiku(ctx, query, func(format string, args ...interface{}) {
+		log.Printf(format, args...)
+	})
+	return r.Intent, r.Complexity
 }
 
 // classifyWithHaiku uses Claude Haiku CLI for accurate intent + complexity classification.

@@ -49,6 +49,33 @@ type Config struct {
 
 	// Tool result compression settings
 	Compression CompressionConfig `yaml:"compression,omitempty"`
+
+	// Semantic router settings (score-based model cascade)
+	SemanticRouter SemanticRouterConfig `yaml:"semantic_router,omitempty"`
+}
+
+// SemanticRouterConfig configures the score-based routing system.
+type SemanticRouterConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	EmbedProvider string `yaml:"embed_provider,omitempty"` // "openai" | "ollama"
+	EmbedModel    string `yaml:"embed_model,omitempty"`    // "text-embedding-3-small"
+	OpenAIAPIKey  string `yaml:"openai_api_key,omitempty"`
+	FallbackModel string `yaml:"fallback_model,omitempty"` // "snowflake-arctic-embed2"
+	Thresholds    struct {
+		Tier1 float64 `yaml:"tier1_local"`
+		Tier2 float64 `yaml:"tier2_fast"`
+		Tier3 float64 `yaml:"tier3_balanced"`
+	} `yaml:"thresholds,omitempty"`
+	Models struct {
+		Tier1 string `yaml:"tier1"`
+		Tier2 string `yaml:"tier2"`
+		Tier3 string `yaml:"tier3"`
+		Tier4 string `yaml:"tier4"`
+	} `yaml:"models,omitempty"`
+	Feedback struct {
+		LearningInterval string `yaml:"learning_interval,omitempty"`
+		MinSamples       int    `yaml:"min_samples,omitempty"`
+	} `yaml:"feedback,omitempty"`
 }
 
 // CompressionConfig holds settings for tool result compression.
@@ -153,6 +180,33 @@ func Load(path string) (*Config, error) {
 		}
 		if c.Compression.RuleMaxItems == 0 {
 			c.Compression.RuleMaxItems = 10
+		}
+	}
+	// Semantic router defaults
+	if c.SemanticRouter.Enabled {
+		if c.SemanticRouter.EmbedProvider == "" {
+			c.SemanticRouter.EmbedProvider = "openai"
+		}
+		if c.SemanticRouter.EmbedModel == "" {
+			c.SemanticRouter.EmbedModel = "text-embedding-3-small"
+		}
+		if c.SemanticRouter.OpenAIAPIKey == "" {
+			c.SemanticRouter.OpenAIAPIKey = os.Getenv("OPENAI_API_KEY")
+		}
+		if c.SemanticRouter.Thresholds.Tier1 == 0 {
+			c.SemanticRouter.Thresholds.Tier1 = 0.85
+		}
+		if c.SemanticRouter.Thresholds.Tier2 == 0 {
+			c.SemanticRouter.Thresholds.Tier2 = 0.65
+		}
+		if c.SemanticRouter.Thresholds.Tier3 == 0 {
+			c.SemanticRouter.Thresholds.Tier3 = 0.45
+		}
+		if c.SemanticRouter.Feedback.MinSamples == 0 {
+			c.SemanticRouter.Feedback.MinSamples = 20
+		}
+		if c.SemanticRouter.Feedback.LearningInterval == "" {
+			c.SemanticRouter.Feedback.LearningInterval = "24h"
 		}
 	}
 	return &c, nil

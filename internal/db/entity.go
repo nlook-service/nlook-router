@@ -83,6 +83,28 @@ type TraceEvent struct {
 	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
+// RoutingFeedback records a routing decision + user feedback.
+type RoutingFeedback struct {
+	ID              int64   `json:"id"`
+	ConversationID  int64   `json:"conversation_id"`
+	MessageID       int64   `json:"message_id"`
+	QueryText       string  `json:"query_text"`
+	MatchedIntent   string  `json:"matched_intent"`
+	SimilarityScore float64 `json:"similarity_score"`
+	ModelTier       int     `json:"model_tier"`
+	ModelUsed       string  `json:"model_used"`
+	Liked           *bool   `json:"liked"`
+	CreatedAt       int64   `json:"created_at"`
+}
+
+// RoutingFeedbackStats is an aggregated stat per intent+tier.
+type RoutingFeedbackStats struct {
+	Intent     string
+	ModelTier  int
+	TotalCount int
+	LikedCount int
+}
+
 // ChatMessage is a local AI conversation history entry.
 type ChatMessage struct {
 	ID             int64     `json:"id"`

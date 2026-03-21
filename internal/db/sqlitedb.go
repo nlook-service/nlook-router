@@ -203,6 +203,21 @@ CREATE TABLE IF NOT EXISTS eval_results (
 );
 CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(eval_run_id);
 CREATE INDEX IF NOT EXISTS idx_eval_results_case ON eval_results(eval_case_id);
+
+CREATE TABLE IF NOT EXISTS routing_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL UNIQUE,
+    query_text TEXT NOT NULL,
+    matched_intent TEXT NOT NULL,
+    similarity_score REAL NOT NULL,
+    model_tier INTEGER NOT NULL,
+    model_used TEXT NOT NULL,
+    liked INTEGER DEFAULT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_routing_feedback_intent_tier ON routing_feedback(matched_intent, model_tier);
+CREATE INDEX IF NOT EXISTS idx_routing_feedback_message ON routing_feedback(message_id);
 `
 
 // --- helpers ---
@@ -993,6 +1008,71 @@ func (s *SQLiteDB) ListEvalResults(ctx context.Context, evalRunID string) ([]*ev
 		}
 		r.CreatedAt = fromEpoch(createdAt)
 		result = append(result, &r)
+	}
+	return result, nil
+}
+
+// --- Routing Feedback ---
+
+func (s *SQLiteDB) InsertRoutingFeedback(ctx context.Context, f *RoutingFeedback) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO routing_feedback (conversation_id, message_id, query_text, matched_intent, similarity_score, model_tier, model_used, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		f.ConversationID, f.MessageID, f.QueryText, f.MatchedIntent, f.SimilarityScore, f.ModelTier, f.ModelUsed, f.CreatedAt)
+	return err
+}
+
+func (s *SQLiteDB) UpdateRoutingFeedbackLiked(ctx context.Context, messageID int64, liked bool) error {
+	v := 0
+	if liked {
+		v = 1
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE routing_feedback SET liked = ? WHERE message_id = ?`, v, messageID)
+	return err
+}
+
+func (s *SQLiteDB) GetRoutingFeedbackStats(ctx context.Context) ([]*RoutingFeedbackStats, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT matched_intent, model_tier, COUNT(*) as total, SUM(CASE WHEN liked = 1 THEN 1 ELSE 0 END) as liked_count
+		 FROM routing_feedback WHERE liked IS NOT NULL
+		 GROUP BY matched_intent, model_tier`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*RoutingFeedbackStats
+	for rows.Next() {
+		var s RoutingFeedbackStats
+		if err := rows.Scan(&s.Intent, &s.ModelTier, &s.TotalCount, &s.LikedCount); err != nil {
+			return nil, err
+		}
+		result = append(result, &s)
+	}
+	return result, nil
+}
+
+func (s *SQLiteDB) GetLikedFeedback(ctx context.Context, since int64) ([]*RoutingFeedback, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, conversation_id, message_id, query_text, matched_intent, similarity_score, model_tier, model_used, liked, created_at
+		 FROM routing_feedback WHERE liked = 1 AND created_at > ?`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*RoutingFeedback
+	for rows.Next() {
+		var f RoutingFeedback
+		var liked *int
+		if err := rows.Scan(&f.ID, &f.ConversationID, &f.MessageID, &f.QueryText, &f.MatchedIntent, &f.SimilarityScore, &f.ModelTier, &f.ModelUsed, &liked, &f.CreatedAt); err != nil {
+			return nil, err
+		}
+		if liked != nil {
+			b := *liked == 1
+			f.Liked = &b
+		}
+		result = append(result, &f)
 	}
 	return result, nil
 }

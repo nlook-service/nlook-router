@@ -34,6 +34,7 @@ import (
 	"github.com/nlook-service/nlook-router/internal/sshproxy"
 	"github.com/nlook-service/nlook-router/internal/tools"
 	"github.com/nlook-service/nlook-router/internal/tracing"
+	"github.com/nlook-service/nlook-router/internal/semantic"
 	"github.com/nlook-service/nlook-router/internal/sysinfo"
 	"github.com/nlook-service/nlook-router/internal/usage"
 	"github.com/nlook-service/nlook-router/internal/ws"
@@ -322,6 +323,63 @@ func RunDaemon(cfg *config.Config) error {
 		chatHandler.SetCompressor(compression.New(compCfg, ollamaClient))
 		if compCfg.Enabled {
 			log.Printf("chat: tool result compression enabled (max_tokens=%d, llm_threshold=%d)", compCfg.MaxTokens, compCfg.LLMThreshold)
+		}
+
+		// Wire semantic router (score-based model cascade)
+		if cfg.SemanticRouter.Enabled {
+			var semEmbedder semantic.Embedder
+			if cfg.SemanticRouter.EmbedProvider == "openai" && cfg.SemanticRouter.OpenAIAPIKey != "" {
+				semEmbedder = semantic.NewOpenAIEmbedder(cfg.SemanticRouter.OpenAIAPIKey, cfg.SemanticRouter.EmbedModel)
+			}
+			if semEmbedder != nil {
+				intentStore := semantic.NewIntentStore(semEmbedder, dataDir)
+				if err := intentStore.Initialize(context.Background()); err != nil {
+					log.Printf("semantic: init failed: %v, using Haiku fallback", err)
+				} else {
+					thresholds := semantic.TierThresholds{
+						Tier1: cfg.SemanticRouter.Thresholds.Tier1,
+						Tier2: cfg.SemanticRouter.Thresholds.Tier2,
+						Tier3: cfg.SemanticRouter.Thresholds.Tier3,
+					}
+					models := semantic.TierModels{
+						Tier1: cfg.SemanticRouter.Models.Tier1,
+						Tier2: cfg.SemanticRouter.Models.Tier2,
+						Tier3: cfg.SemanticRouter.Models.Tier3,
+						Tier4: cfg.SemanticRouter.Models.Tier4,
+					}
+					// Fill defaults for empty model names
+					if models.Tier1 == "" {
+						models.Tier1 = "gemma3:4b"
+					}
+					if models.Tier2 == "" {
+						models.Tier2 = "claude-haiku-4-5-20251001"
+					}
+					if models.Tier3 == "" {
+						models.Tier3 = "claude-sonnet-4-6-20260320"
+					}
+					if models.Tier4 == "" {
+						models.Tier4 = "claude-opus-4-6-20260318"
+					}
+
+					// Haiku fallback: when semantic score is too low, use Haiku for classification
+				haikuFallback := func(ctx context.Context, query string) semantic.ClassifyResult {
+					intent, complexity := chatHandler.ClassifyWithHaiku(ctx, query)
+					return semantic.ClassifyResult{Intent: intent, Complexity: complexity, ModelTier: 2, Model: models.Tier2}
+				}
+				semRouter := semantic.NewRouter(intentStore, semEmbedder, thresholds, models, haikuFallback)
+					chatHandler.SetSemanticRouter(semRouter)
+
+					if storage != nil {
+						feedbackMgr := semantic.NewFeedbackManager(storage, intentStore, semEmbedder, cfg.SemanticRouter.Feedback.MinSamples)
+						chatHandler.SetFeedbackManager(feedbackMgr)
+						go feedbackMgr.StartLearningLoop(context.Background(), cfg.SemanticRouter.Feedback.LearningInterval)
+					}
+
+					log.Printf("semantic: enabled (provider=%s model=%s)", cfg.SemanticRouter.EmbedProvider, cfg.SemanticRouter.EmbedModel)
+				}
+			} else {
+				log.Printf("semantic: no embedder available, using Haiku fallback")
+			}
 		}
 
 		// Wire SSH messages from cloud → SSH proxy

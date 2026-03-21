@@ -78,6 +78,12 @@ type DB interface {
 	InsertEvalResult(ctx context.Context, result *eval.EvalResult) error
 	ListEvalResults(ctx context.Context, evalRunID string) ([]*eval.EvalResult, error)
 
+	// --- Routing Feedback ---
+	InsertRoutingFeedback(ctx context.Context, f *RoutingFeedback) error
+	UpdateRoutingFeedbackLiked(ctx context.Context, messageID int64, liked bool) error
+	GetRoutingFeedbackStats(ctx context.Context) ([]*RoutingFeedbackStats, error)
+	GetLikedFeedback(ctx context.Context, since int64) ([]*RoutingFeedback, error)
+
 	// --- Lifecycle ---
 	Migrate(ctx context.Context) error
 	Close() error
