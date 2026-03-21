@@ -8,6 +8,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/nlook-service/nlook-router/internal/mcp"
 )
@@ -128,12 +129,14 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 			}
 		}
 		tlog("intent: 🔧 calling built-in tool: %s (tool=%s)", intent.Action, toolName)
+		toolStart := time.Now()
 		result, err := toolExec.Execute(ctx, toolName, toolArgs)
+		toolElapsed := time.Since(toolStart).Milliseconds()
 		if err != nil {
-			tlog("intent: ✗ tool exec failed: %v", err)
+			tlog("intent: ✗ tool exec failed (%dms): %v", toolElapsed, err)
 			return fmt.Sprintf("[도구 오류: %v]", err)
 		}
-		tlog("intent: ✓ tool result size=%d bytes", len(result))
+		tlog("intent: ✓ tool result size=%d bytes (%dms)", len(result), toolElapsed)
 
 		// Parse bridge response: check for nested errors
 		resultStr := extractToolResult(result)
@@ -154,8 +157,13 @@ func ExecuteIntent(ctx context.Context, intent *Intent, mcpClient *mcp.Client, t
 			}
 		}
 
-		if len(resultStr) > 3000 {
-			resultStr = resultStr[:3000] + "..."
+		// Truncate large results (read_url can return 100KB+)
+		maxLen := 3000
+		if toolName == "read_url" {
+			maxLen = 2000 // URL content: keep concise for LLM
+		}
+		if len(resultStr) > maxLen {
+			resultStr = resultStr[:maxLen] + "\n... (truncated)"
 		}
 		return resultStr
 	}
